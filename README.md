@@ -60,7 +60,12 @@
 | `discovery` | 闭包扫描（`peek_class_and_name` 定界嗅探，不全解析）、名字索引、clip 发现 |
 | `clip_curves` | 桥的零解析曲线负载（JSON 索引 + float32 payload） |
 | `clip_paths` | 曲线绑定重锚：后缀 CRC32 表修 `path_0x...` 占位符与不同嵌套深度 |
-| `humanoid_retarget` | Avatar muscle 重定向（纯数学，零宿主依赖） |
+| `muscles` | Unity humanoid muscle 分类表（95 muscle / BoneType 枚举序 / twist-solve 对 / 质心公式）+ `is_muscle`/`is_root` |
+
+> `humanoid_retarget`（muscle → 骨骼旋转的实际求解）**留在 Blender 插件里**：它整套数学
+> 是拿 `mathutils.Quaternion/Matrix` 写的，进不来。但它依赖的那些表是 Unity 自己的定义、
+> 与宿主无关，所以拆出来放在 `muscles` —— 只需要"认出这是不是 humanoid clip"的调用方
+> （`clip_paths.clip_is_humanoid`）因此不必拖进一个矩阵库。
 
 ### `runtime/` —— 进程管线
 

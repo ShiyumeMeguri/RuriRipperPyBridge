@@ -29,7 +29,7 @@ from __future__ import annotations
 import re
 import zlib
 
-from . import clip_curves, humanoid_retarget
+from . import clip_curves, muscles
 
 # AssetRipper's placeholder for a binding it could not restore to a string.
 _HASHED_PATH_RE = re.compile(r"^path_0x([0-9A-Fa-f]{1,8})_")
@@ -151,11 +151,10 @@ def clip_is_humanoid(clip_data):
     that a humanoid clip was imported with no Avatar in scope, which silently
     drops the entire body's motion)."""
     if isinstance(clip_data, clip_curves.ClipCurves):
-        return any(humanoid_retarget.is_muscle(ch.attribute)
-                   or humanoid_retarget.is_root(ch.attribute)
+        return any(muscles.is_muscle(ch.attribute) or muscles.is_root(ch.attribute)
                    for ch in clip_data.floats)
     for entry in clip_data.get("m_FloatCurves") or []:
         attribute = entry.get("attribute") or ""
-        if humanoid_retarget.is_muscle(attribute) or humanoid_retarget.is_root(attribute):
+        if muscles.is_muscle(attribute) or muscles.is_root(attribute):
             return True
     return False
