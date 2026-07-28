@@ -476,8 +476,11 @@ class RipperBridge:
 
     def import_cabs(self, cab_names):
         """Resolve cab_names' dependency closure, load it, export it in-memory, and return
-        (documents, textures, roots, seed_roots, clips_by_cab, scene_roots): documents/textures
-        are plain Python dicts keyed by lowercase guid (str -> str Unity-YAML text, str -> bytes PNG);
+        (assets, roots, seed_roots, clips_by_cab, scene_roots): assets is a plain Python dict
+        keyed by lowercase guid holding each exported asset's own bytes, whatever AssetRipper
+        wrote for it -- YAML, PNG, TGA, EXR, anything. The bridge never inspects a payload's
+        format, so a caller decodes what it asked for and a new export format needs no change
+        anywhere (see BridgeAssetDatabase, which does exactly that lazily);
         roots is the list of guids that are the actual importable (.prefab) top-level assets;
         seed_roots is {cab_name: guid} for each requested cab_names entry that resolved to its
         own asset -- resolved bridge-side directly through the cabmap's own CAB/addressable-path
@@ -499,8 +502,7 @@ class RipperBridge:
         result = self._bridge.ImportCabs(self._map, _string_array(cab_names))
         # .NET IReadOnlyDictionary crosses into Python as an iterable of
         # KeyValuePair (no dict-like .items()) -- iterate and pull .Key/.Value.
-        documents = {str(kvp.Key).lower(): str(kvp.Value) for kvp in result.Documents}
-        textures = {str(kvp.Key).lower(): bytes(kvp.Value) for kvp in result.Textures}
+        assets = {str(kvp.Key).lower(): bytes(kvp.Value) for kvp in result.Assets}
         roots = [str(g).lower() for g in result.Roots]
         seed_roots = {str(kvp.Key): str(kvp.Value).lower() for kvp in result.SeedRoots}
         clips_by_cab = {str(kvp.Key).lower(): [str(g).lower() for g in kvp.Value]
@@ -521,7 +523,7 @@ class RipperBridge:
             meta = meta_by_guid.get(guid)
             if meta:
                 self.clip_curves_by_guid[guid] = (meta, bytes(kvp.Value))
-        return documents, textures, roots, seed_roots, clips_by_cab, scene_roots
+        return assets, roots, seed_roots, clips_by_cab, scene_roots
 
     def find_associated_avatar_cabs(self, clip_cab_name):
         """Every Avatar-bearing CAB in a clip-hosting CAB's dependency neighborhood, nearest
