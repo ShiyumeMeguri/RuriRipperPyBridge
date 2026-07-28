@@ -19,10 +19,6 @@ constant it needs (SEARCH_DEBOUNCE_SECONDS) and the work it triggers
 
 from __future__ import annotations
 
-import re
-
-import numpy as np
-
 from ..runtime import pythonnet_bridge
 
 DISPLAY_CAP = 500  # max rows ever materialized into the UI at once
@@ -77,18 +73,18 @@ _sort_column = "name"
 _sort_dir = 0  # 0 = unsorted (load order), 1 = ascending, 2 = descending
 _active_rules = ()  # whatever was last passed to apply_filter()'s `rules` arg
 
-# --- Process-Monitor-style Include/Exclude rule engine, ported from the
-# WinForms browser's MainForm.Filter.cs (FilterRule record + RowPasses /
-# RelationMatches / CompareValues / TryRegex). A "rule" is anything exposing
-# .field / .relation / .value / .action / .enabled attributes -- a DUCK TYPE on
-# purpose, so a host can pass its own UI-backed storage straight in (Blender's
-# rules really are bpy PropertyGroup instances) and Rule below covers headless,
-# test and Qt-side use without anything having to convert between them.
+# --- Process-Monitor-style Include/Exclude rules. The DATA shape only: matching
+# lives in the ONE C# engine (CabTableSearch, the same implementation behind the
+# WinForms browser), reached through RipperBridge.search_table -- a host never
+# evaluates a rule itself. A "rule" is anything exposing .field / .relation /
+# .value / .action / .enabled attributes -- a DUCK TYPE on purpose, so a host can
+# pass its own UI-backed storage straight in (Blender's rules really are bpy
+# PropertyGroup instances) and Rule below covers headless and Qt-side use.
 #
 # Every enabled rule is a required constraint: Include(X) means the row MUST
 # match X, Exclude(X) means the row must NOT match X. A row passes only if
 # ALL enabled rules hold simultaneously (empty/all-disabled rule set => show
-# everything). MainForm.Filter.cs carries the matching fix.
+# everything).
 
 FILTER_FIELDS = ("name", "container", "type_names", "source", "deps")
 FIELD_LABELS = {"name": "Name", "container": "Container", "type_names": "Type",
@@ -117,59 +113,6 @@ class Rule:
         self.value = value
         self.action = action
         self.enabled = enabled
-
-
-def _relation_matches(relation, cell_value, rule_value):
-    """Mirrors RelationMatches/CompareValues/TryRegex."""
-    if relation in ("less_than", "more_than"):
-        try:
-            lhs, rhs = float(cell_value), float(rule_value)
-        except (TypeError, ValueError):
-            return False
-        return lhs < rhs if relation == "less_than" else lhs > rhs
-
-    text = str(cell_value).lower()
-    needle = str(rule_value).lower()
-    if relation == "is":
-        return text == needle
-    if relation == "is_not":
-        return text != needle
-    if relation == "contains":
-        return needle in text
-    if relation == "excludes":
-        return needle not in text
-    if relation == "begins_with":
-        return text.startswith(needle)
-    if relation == "ends_with":
-        return text.endswith(needle)
-    if relation in ("matches_regex", "not_matches_regex"):
-        try:
-            found = re.search(str(rule_value), str(cell_value), re.IGNORECASE) is not None
-        except re.error:
-            return False
-        return found if relation == "matches_regex" else not found
-    return False
-
-
-def _rule_matches(rule, row):
-    return _relation_matches(rule.relation, row.get(rule.field, ""), rule.value)
-
-
-def row_passes_rules(row, rules):
-    """Mirrors RowPasses: every ENABLED rule is a required constraint --
-    Include(X) requires a match, Exclude(X) requires a non-match. A row
-    passes only if it satisfies every enabled rule (no rules => show all)."""
-    for rule in rules:
-        if not rule.enabled:
-            continue
-        matched = _rule_matches(rule, row)
-        if rule.action == "exclude":
-            if matched:
-                return False
-        else:
-            if not matched:
-                return False
-    return True
 
 
 def reset():
@@ -549,28 +492,22 @@ def leaf_name_in_current_dir(index):
 
 def apply_filter(query, rules=()):
     """Row shows if it matches the quick search across Name/Container/Source/
-    Type AND passes the Include/Exclude rule set (row_passes_rules) --
-    mirrors the WinForms browser's RowPasses exactly (quick search AND rules,
-    both must pass).
-
-    The quick search runs vectorized over the RowTable's column blobs; the
-    rule engine, when rules exist, evaluates per-row over the already-
-    search-narrowed candidates only. Always a FLAT result set over the whole
-    cabmap, never scoped to CURRENT_DIR -- see refresh_visible for how this
-    and the folder browser (browse_dir) dispatch between each other."""
+    Type/Cab AND passes the Include/Exclude rule set -- one call into the C#
+    CabTableSearch engine, which quick-searches the raw column blobs
+    (vectorized, all cores), evaluates the rules over the narrowed candidates
+    and hands back the ids ALREADY sorted by the current column. Always a FLAT
+    result set over the whole cabmap, never scoped to CURRENT_DIR -- see
+    refresh_visible for how this and the folder browser (browse_dir) dispatch
+    between each other."""
     global VISIBLE, _active_rules, CURRENT_SUBFOLDERS
-    query = (query or "").strip().lower()
     rules = tuple(rules)
     _active_rules = rules
     CURRENT_SUBFOLDERS = []
-    enabled_rules = [r for r in rules if r.enabled]
-    candidates = np.flatnonzero(ROWS.search_mask(query))
-    if enabled_rules:
-        VISIBLE = [int(i) for i in candidates
-                   if row_passes_rules(ROWS[int(i)], enabled_rules)]
-    else:
-        VISIBLE = candidates.tolist()
-    _apply_sort()
+    if BRIDGE is None:
+        VISIBLE = []
+        return
+    VISIBLE = BRIDGE.search_table((query or "").strip(), rules,
+                                  _sort_column, _sort_dir).tolist()
 
 
 def reapply_filter(query):
@@ -592,10 +529,11 @@ def _apply_sort():
     if _sort_dir == 0:
         VISIBLE.sort()  # back to load order
         return
-    # Columnar: one cached key-materialization pass per column instead of
-    # deriving display strings inside every comparison.
-    values = ROWS.sort_values(_sort_column)
-    VISIBLE.sort(key=values.__getitem__, reverse=(_sort_dir == 2))
+    if BRIDGE is None or not VISIBLE:
+        return
+    # Same C# engine as apply_filter, over the current id set (the folder
+    # view's listing, or a re-click on an already-filtered result).
+    VISIBLE = BRIDGE.sort_rows(VISIBLE, _sort_column, _sort_dir).tolist()
 
 
 def cycle_sort(column):

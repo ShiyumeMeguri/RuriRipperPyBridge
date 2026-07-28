@@ -62,15 +62,14 @@ class RowView:
 
 class _StringColumn:
     """One string column: a single big str + int64 char-offset array. Values
-    are slices; searching is str.find over the big string with hits filtered
-    to those that do not straddle a value boundary."""
+    are slices. Searching/sorting lives in the C# CabTableSearch engine; this
+    side only ever derives the display window's strings."""
 
-    __slots__ = ("big", "offsets", "_lower")
+    __slots__ = ("big", "offsets")
 
     def __init__(self, big, offsets):
         self.big = big
         self.offsets = offsets  # (n+1,) int64 char offsets
-        self._lower = None
 
     @classmethod
     def from_blob(cls, blob_bytes, offsets_bytes):
@@ -92,28 +91,7 @@ class _StringColumn:
     def value(self, index):
         return self.big[self.offsets[index]:self.offsets[index + 1]]
 
-    def lower(self):
-        if self._lower is None:
-            self._lower = self.big.lower()
-        return self._lower
 
-    def find_value_ids(self, needle_lower):
-        """Ids of every value containing needle_lower (case-insensitive),
-        as a sorted unique numpy array."""
-        haystack = self.lower()
-        length = len(needle_lower)
-        positions = []
-        position = haystack.find(needle_lower)
-        while position != -1:
-            positions.append(position)
-            position = haystack.find(needle_lower, position + 1)
-        if not positions:
-            return np.empty(0, dtype=np.int64)
-        starts = np.asarray(positions, dtype=np.int64)
-        start_ids = np.searchsorted(self.offsets, starts, side="right") - 1
-        end_ids = np.searchsorted(self.offsets, starts + length - 1, side="right") - 1
-        within = start_ids == end_ids  # a hit straddling two values is not a match in either
-        return np.unique(start_ids[within])
 
 
 class RowTable:
@@ -122,7 +100,7 @@ class RowTable:
 
     __slots__ = ("count", "cabs", "sources", "paths", "path_starts",
                  "class_flat", "class_starts", "deps", "class_names",
-                 "_asset_bundle_id", "_cab_to_index", "_sort_cache")
+                 "_asset_bundle_id", "_cab_to_index")
 
     def __init__(self, count, cabs, sources, paths, path_starts,
                  class_flat, class_starts, deps, class_names):
@@ -138,7 +116,6 @@ class RowTable:
         self._asset_bundle_id = next(
             (i for i, n in class_names.items() if n == "AssetBundle"), 142)
         self._cab_to_index = None
-        self._sort_cache = {}
 
     @classmethod
     def from_dicts(cls, rows):
@@ -282,70 +259,4 @@ class RowTable:
                                   for i in range(self.count)}
         return self._cab_to_index
 
-    # ── quick search (columnar) ───────────────────────────────────────────────
 
-    def search_mask(self, query):
-        """Row mask for the quick-search box: case-insensitive substring over
-        the same fields the legacy per-row match used (name / container /
-        source / type). Container/name matching runs over the RAW container
-        paths -- the display join's " | " separators, its 16KB cap tail and
-        the derived "(+N)" suffix were never meaningful search targets (and
-        the cap made overlong rows partially unsearchable)."""
-        needle = query.strip().lower()
-        mask = np.zeros(self.count, dtype=bool)
-        if not needle:
-            mask[:] = True
-            return mask
-
-        # source column: value id == row id
-        mask[self.sources.find_value_ids(needle)] = True
-
-        # container paths: path row -> entry row
-        path_ids = self.paths.find_value_ids(needle)
-        if len(path_ids):
-            row_ids = np.searchsorted(self.path_starts, path_ids, side="right") - 1
-            mask[np.unique(row_ids)] = True
-
-        # type names: query -> matching class ids -> rows carrying one. The
-        # AssetBundle id is excluded here because the display column SKIPS it
-        # (a "Transform, GameObject" row never showed the word AssetBundle,
-        # so it must not match "assetbundle" now either).
-        matching_ids = [cid for cid, cname in self.class_names.items()
-                        if needle in cname.lower() and cid != self._asset_bundle_id]
-        if matching_ids:
-            hits = np.isin(self.class_flat, matching_ids)
-            positions = np.flatnonzero(hits)
-            if len(positions):
-                row_ids = np.searchsorted(self.class_starts, positions, side="right") - 1
-                mask[np.unique(row_ids)] = True
-        # Rows whose class list is empty or AssetBundle-only DISPLAY as the
-        # literal "AssetBundle" -- keep those searchable by that word.
-        if needle in "assetbundle":
-            non_bundle_cumulative = np.concatenate(
-                [[0], np.cumsum(self.class_flat != self._asset_bundle_id)])
-            non_bundle_per_row = (non_bundle_cumulative[self.class_starts[1:]]
-                                  - non_bundle_cumulative[self.class_starts[:-1]])
-            mask[non_bundle_per_row == 0] = True
-
-        return mask
-
-    def sort_values(self, column):
-        """Materialized per-row sort keys for one column, cached -- built on
-        the first header click, numpy-cheap for deps, one derivation pass for
-        the string columns."""
-        cached = self._sort_cache.get(column)
-        if cached is None:
-            if column == "deps":
-                cached = self.deps
-            elif column == "name":
-                cached = [self.name(i) for i in range(self.count)]
-            elif column == "container":
-                cached = [self.container(i) for i in range(self.count)]
-            elif column == "type_names":
-                cached = [self.type_names(i) for i in range(self.count)]
-            elif column == "source":
-                cached = [self.source(i) for i in range(self.count)]
-            else:
-                cached = [self.cab(i) for i in range(self.count)]
-            self._sort_cache[column] = cached
-        return cached

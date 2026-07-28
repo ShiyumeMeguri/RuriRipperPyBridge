@@ -384,6 +384,35 @@ class RipperBridge:
         from . import row_table
         return row_table.RowTable.from_packed(self._bridge.EnumerateTablePacked(self._map))
 
+    def search_table(self, query, rules=None, sort_column="name", sort_direction=0):
+        """Quick search + Include/Exclude rules + sort over the loaded cabmap, on the C#
+        CabTableSearch engine (the SAME implementation the WinForms browser runs -- the
+        hosts carry no row-matching logic of their own). ``rules`` is any iterable of
+        objects exposing .field/.relation/.value/.action/.enabled (the UI rule duck type);
+        ``sort_direction`` is 0 = load order, 1 = ascending, 2 = descending. Returns the
+        visible row ids as a numpy int32 array, already sorted."""
+        if self._map is None:
+            raise RuntimeError("No cabmap loaded -- call load_cab_map()/build_cab_map() first.")
+        import numpy as np
+        flat = []
+        for rule in (rules or ()):
+            flat.extend((str(rule.field), str(rule.relation), str(rule.value),
+                         str(rule.action), "1" if rule.enabled else "0"))
+        payload = self._bridge.SearchTable(self._map, query or "",
+                                           _string_array(flat) if flat else None,
+                                           str(sort_column), int(sort_direction))
+        return np.frombuffer(bytes(payload), dtype="<i4")
+
+    def sort_rows(self, row_ids, sort_column, sort_direction):
+        """Sort an explicit row-id subset (the folder view's listing) by a display column --
+        same engine, encoding and direction semantics as search_table."""
+        if self._map is None:
+            raise RuntimeError("No cabmap loaded -- call load_cab_map()/build_cab_map() first.")
+        import numpy as np
+        payload = self._bridge.SortRows(self._map, _int_array(row_ids),
+                                        str(sort_column), int(sort_direction))
+        return np.frombuffer(bytes(payload), dtype="<i4")
+
     def resolve_cabs_for_paths(self, container_paths):
         """Resolve addressable container paths (e.g. discover_scene_placements'
         asset_path values) to the CAB names that host them. Paths with no

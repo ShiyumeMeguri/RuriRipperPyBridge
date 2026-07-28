@@ -98,59 +98,10 @@ class TestBakeBindPose(unittest.TestCase):
         np.testing.assert_allclose(decoded.positions, [[1.0, 1.0, 1.0]], atol=1e-6)
 
 
-def _row(**fields):
-    base = {"name": "", "container": "", "type_names": "", "source": "", "deps": 0}
-    base.update(fields)
-    return base
-
-
-class TestRuleEngine(unittest.TestCase):
-    """Every ENABLED rule is a required constraint (WinForms Filter.cs parity)."""
-
-    def test_no_rules_shows_everything(self):
-        self.assertTrue(cabmap_state.row_passes_rules(_row(name="anything"), []))
-
-    def test_include_requires_a_match(self):
-        rules = [cabmap_state.Rule("name", "contains", "chr", "include")]
-        self.assertTrue(cabmap_state.row_passes_rules(_row(name="chr_0013"), rules))
-        self.assertFalse(cabmap_state.row_passes_rules(_row(name="env_rock"), rules))
-
-    def test_exclude_requires_a_non_match(self):
-        rules = [cabmap_state.Rule("name", "contains", "lod", "exclude")]
-        self.assertTrue(cabmap_state.row_passes_rules(_row(name="wall"), rules))
-        self.assertFalse(cabmap_state.row_passes_rules(_row(name="wall_lod2"), rules))
-
-    def test_rules_are_conjunctive(self):
-        rules = [cabmap_state.Rule("name", "contains", "chr", "include"),
-                 cabmap_state.Rule("name", "ends_with", "_lod2", "exclude")]
-        self.assertTrue(cabmap_state.row_passes_rules(_row(name="chr_body"), rules))
-        self.assertFalse(cabmap_state.row_passes_rules(_row(name="chr_body_lod2"), rules))
-
-    def test_disabled_rules_are_inert(self):
-        rules = [cabmap_state.Rule("name", "is", "nothing", "include", enabled=False)]
-        self.assertTrue(cabmap_state.row_passes_rules(_row(name="anything"), rules))
-
-    def test_numeric_relations(self):
-        rules = [cabmap_state.Rule("deps", "more_than", "3", "include")]
-        self.assertTrue(cabmap_state.row_passes_rules(_row(deps=4), rules))
-        self.assertFalse(cabmap_state.row_passes_rules(_row(deps=3), rules))
-
-    def test_non_numeric_value_fails_a_numeric_relation(self):
-        rules = [cabmap_state.Rule("deps", "less_than", "abc", "include")]
-        self.assertFalse(cabmap_state.row_passes_rules(_row(deps=1), rules))
-
-    def test_matching_is_case_insensitive(self):
-        rules = [cabmap_state.Rule("name", "is", "CHR_Body", "include")]
-        self.assertTrue(cabmap_state.row_passes_rules(_row(name="chr_body"), rules))
-
-    def test_regex_relations(self):
-        rules = [cabmap_state.Rule("name", "matches_regex", r"_lod\d$", "include")]
-        self.assertTrue(cabmap_state.row_passes_rules(_row(name="wall_lod2"), rules))
-        self.assertFalse(cabmap_state.row_passes_rules(_row(name="wall"), rules))
-
-    def test_invalid_regex_never_raises(self):
-        rules = [cabmap_state.Rule("name", "matches_regex", "([", "include")]
-        self.assertFalse(cabmap_state.row_passes_rules(_row(name="wall"), rules))
+class TestQueryDispatch(unittest.TestCase):
+    """Rule EVALUATION lives in the C# CabTableSearch engine (single implementation,
+    shared with the WinForms browser); host-free coverage here is limited to the
+    dispatch policy that stays in python."""
 
     def test_has_active_query(self):
         self.assertTrue(cabmap_state.has_active_query("chr", ()))
@@ -159,13 +110,6 @@ class TestRuleEngine(unittest.TestCase):
         self.assertFalse(cabmap_state.has_active_query("", [rule]))
         rule.enabled = True
         self.assertTrue(cabmap_state.has_active_query("", [rule]))
-
-    def test_duck_typed_rules_work(self):
-        """A host passes its own UI-backed objects straight in."""
-        class HostRule:
-            field, relation, value, action, enabled = "name", "contains", "chr", "include", True
-
-        self.assertTrue(cabmap_state.row_passes_rules(_row(name="chr_x"), [HostRule()]))
 
 
 if __name__ == "__main__":
