@@ -234,19 +234,24 @@ def clear_animation_build_state():
     ANIMATION_BUILD_STATE = None
 
 
-def load_rows():
-    """Pull every row from the currently-loaded cabmap into ROWS and reset the
-    browser to the virtual root folder. ROWS is a columnar row_table.RowTable
-    -- indexing/iteration yield dict-compatible row views, so per-row
-    consumers are unchanged while the hot paths (search/sort/window) run
-    columnar."""
+def load_rows(preferred_dir=()):
+    """Pull every row from the currently-loaded cabmap into ROWS and point the
+    browser at ``preferred_dir`` (the virtual root when omitted). ROWS is a
+    columnar row_table.RowTable -- indexing/iteration yield dict-compatible row
+    views, so per-row consumers are unchanged while the hot paths (search/sort/
+    window) run columnar.
+
+    ``preferred_dir`` lets a host restore the folder the user was last browsing
+    instead of dumping them back at the root on every Load; a path that no
+    longer exists in THIS map (a different game, a renamed folder) simply falls
+    back to the root -- see browse_dir."""
     global ROWS, _ROWS_BY_CAB
     if BRIDGE is None:
         raise RuntimeError("No bridge session -- call ensure_bridge() first.")
     ROWS = BRIDGE.enumerate_table()
     _ROWS_BY_CAB = None  # rebuilt lazily on first rows_by_cab() call
     clear_selection()    # cab keys from a previous map mean nothing in this one
-    _build_tree()        # also resets CURRENT_DIR/VISIBLE/CURRENT_SUBFOLDERS to the root listing
+    _build_tree(preferred_dir)  # also sets CURRENT_DIR/VISIBLE/CURRENT_SUBFOLDERS
 
 
 _ROWS_BY_CAB = None  # dict[str, dict] -- lazily built cab -> row index, see rows_by_cab()
@@ -327,7 +332,7 @@ def _add_leaf(segments, row_index):
     node.files.append(row_index)
 
 
-def _build_tree():
+def _build_tree(preferred_dir=()):
     """Rebuild the folder tree from ROWS and reset browsing to the root. A row
     exported under more than one container path (rare) appears as its own
     leaf under EVERY one of its paths -- the same asset reachable from more
@@ -356,7 +361,7 @@ def _build_tree():
                 placed = True
         if not placed:
             _add_leaf((_NO_PATH_BUCKET, cab_of(index)), index)
-    browse_dir(())
+    browse_dir(tuple(preferred_dir))
 
 
 def folder_of(row_index, path_index=0):
@@ -365,7 +370,9 @@ def folder_of(row_index, path_index=0):
     under -- mirrors _build_tree's own placement logic exactly (including its
     zero-container-paths fallback into a _NO_PATH_BUCKET folder keyed by cab),
     so "jump to this row's folder" always lands exactly where browse_dir
-    would already show it. path_index is clamped, not validated -- callers
+    would already show it. Hosts persist the browsed folder as the "/"-joined
+    form of CURRENT_DIR and hand it back to load_rows(); see dir_to_key/
+    key_to_dir for that round trip. path_index is clamped, not validated -- callers
     that don't care which of a multi-path row's folders they land in (the
     common case) can just pass the default 0."""
     path_count = ROWS.container_path_count(row_index)
@@ -448,6 +455,20 @@ def browse_dir(path):
     CURRENT_SUBFOLDERS = subfolders
     VISIBLE = files
     _apply_sort()
+
+
+def dir_to_key(path=None):
+    """The browsed folder as the flat "a/b/c" string a host persists (empty at
+    the root). Defaults to CURRENT_DIR, i.e. "remember where I am now"."""
+    return "/".join(CURRENT_DIR if path is None else path)
+
+
+def key_to_dir(key):
+    """A persisted dir_to_key string back to a segment tuple. Blank/garbage
+    resolves to the root, and browse_dir independently falls back to the root
+    for a path that does not exist in the CURRENT map -- so a key saved against
+    a different game can never strand the browser."""
+    return tuple(segment for segment in (key or "").split("/") if segment)
 
 
 def has_active_query(query, rules):
