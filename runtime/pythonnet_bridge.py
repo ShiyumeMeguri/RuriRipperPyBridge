@@ -305,6 +305,12 @@ def _string_array(strings):
     return System.Array[System.String](list(strings))
 
 
+def _int_array(values):
+    """Same story for int[] -- see _string_array."""
+    import System
+    return System.Array[System.Int32]([int(v) for v in values])
+
+
 def _as_root_list(vfs_roots):
     """VFS-root parameters accept either one path (str) or a priority-ordered
     list of paths -- normalize to a list so callers don't have to remember
@@ -328,6 +334,13 @@ class RipperBridge:
         # {clip guid -> (meta_json, payload_bytes)} from the LAST import_cabs
         # call -- the zero-parse curve fast path (see ClipCurveBlob.cs).
         self.clip_curves_by_guid = {}
+        # {mesh guid -> (meta_json, payload_bytes)} -- the geometry counterpart
+        # (see MeshRawBlob.cs), same replacement policy per import_cabs call.
+        self.mesh_blobs_by_guid = {}
+        # {root guid -> hosting cab name} for the LAST import_cabs call -- the
+        # per-root CAB attribution (RipperBlenderBridge.BuildRootCabs) that lets
+        # a UNION closure's roots be split back into their sub-closures.
+        self.root_cabs_by_guid = {}
 
     @property
     def hook_ids(self):
@@ -474,7 +487,7 @@ class RipperBridge:
             for p in self._bridge.DiscoverScenePlacements(_string_array(_as_root_list(vfs_roots)), map_name)
         ]
 
-    def import_cabs(self, cab_names):
+    def import_cabs(self, cab_names, export_class_ids=None):
         """Resolve cab_names' dependency closure, load it, export it in-memory, and return
         (assets, roots, seed_roots, clips_by_cab, scene_roots): assets is a plain Python dict
         keyed by lowercase guid holding each exported asset's own bytes, whatever AssetRipper
@@ -495,11 +508,23 @@ class RipperBridge:
         path is its host FBX ("...a_x_01.fbx") while the exported .anim is named after the
         clip's own m_Name ("...A_x_ACL.anim"), one CAB can host several clips, and the two
         stems genuinely differ -- so this map is the ONLY correct way to translate a clip-CAB
-        browser row into its real clip documents; never join display names to m_Names."""
+        browser row into its real clip documents; never join display names to m_Names.
+
+        export_class_ids: optional ClassID allowlist applied to the EXPORT side only
+        (RipperBlenderBridge.ImportCabsFiltered). The closure is still resolved, loaded and
+        processed in full -- humanoid muscle solve and hashed-curve-path restore need the whole
+        rig in scope -- but only assets of the listed classes are serialized and returned. The
+        standalone-clip flow passes [AnimationClip's id]: its closure co-seeds the entire
+        character for scope, and re-serializing that character's textures/meshes was most of the
+        call's wall time for data the flow never reads."""
         if self._map is None:
             raise RuntimeError("No cabmap loaded -- call load_cab_map()/build_cab_map() first.")
         cab_names = list(cab_names)
-        result = self._bridge.ImportCabs(self._map, _string_array(cab_names))
+        if export_class_ids:
+            result = self._bridge.ImportCabsFiltered(self._map, _string_array(cab_names),
+                                                     _int_array(export_class_ids))
+        else:
+            result = self._bridge.ImportCabs(self._map, _string_array(cab_names))
         # .NET IReadOnlyDictionary crosses into Python as an iterable of
         # KeyValuePair (no dict-like .items()) -- iterate and pull .Key/.Value.
         assets = {str(kvp.Key).lower(): bytes(kvp.Value) for kvp in result.Assets}
@@ -523,6 +548,21 @@ class RipperBridge:
             meta = meta_by_guid.get(guid)
             if meta:
                 self.clip_curves_by_guid[guid] = (meta, bytes(kvp.Value))
+        # Mesh raw blobs (JSON index + raw buffer payload, see MeshRawBlob.cs):
+        # the geometry the YAML documents carry, as the bytes they already were --
+        # mesh building never parses multi-MB hex text again.
+        self.mesh_blobs_by_guid = {}
+        mesh_meta_by_guid = {str(kvp.Key).lower(): str(kvp.Value) for kvp in result.MeshBlobMeta}
+        for kvp in result.MeshBlobData:
+            guid = str(kvp.Key).lower()
+            meta = mesh_meta_by_guid.get(guid)
+            if meta:
+                self.mesh_blobs_by_guid[guid] = (meta, bytes(kvp.Value))
+        # Per-root CAB attribution (see BuildRootCabs) -- how a union closure's
+        # root set is split back into "the hierarchy rows' own roots" vs the
+        # co-seeded clip/avatar CABs' rig prefabs.
+        self.root_cabs_by_guid = {str(kvp.Key).lower(): str(kvp.Value).lower()
+                                  for kvp in result.RootCabs}
         return assets, roots, seed_roots, clips_by_cab, scene_roots
 
     def find_associated_avatar_cabs(self, clip_cab_name):

@@ -207,18 +207,12 @@ def _decode_channel(blob, stream_offsets, stream_strides, channel, count):
     return out
 
 
-def decode_mesh(doc):
-    """Decode a parsed Mesh document (UnityDocument.data) into a DecodedMesh."""
-    data = doc.data if hasattr(doc, "data") else doc
-    mesh = DecodedMesh(data.get("m_Name", "Mesh"))
-
-    vdata = data.get("m_VertexData") or {}
-    count = vdata.get("m_VertexCount", 0)
-    mesh.vertex_count = count
-    channels = vdata.get("m_Channels") or []
-    blob_hex = _clean_hex(vdata.get("_typelessdata"))
-    blob = bytes.fromhex(blob_hex) if blob_hex else b""
-
+def _decode_vertex_channels(mesh, blob, channels, count):
+    """Decode every vertex channel out of the raw vertex buffer into `mesh`,
+    shared verbatim between the YAML path (hex-decoded _typelessdata) and the
+    bridge blob path (the same bytes, never hex-encoded at all). Returns the
+    packed-normal candidates the unit-length gate cannot judge (resolved
+    against the geometry once the triangles exist)."""
     # Compute per-stream strides from the channels (sanitising dimensions),
     # then lay streams out back-to-back as Unity serialises them.
     stream_strides = {}
@@ -237,90 +231,84 @@ def decode_mesh(doc):
         stream_offsets[stream] = running
         running += stream_strides[stream] * count
 
-    # Packed normal candidates that the unit-length gate cannot judge (they
-    # decode to unit vectors by construction); resolved against the geometry
-    # after the triangles are built.
     packed_candidates = []
 
     def ch(i):
         return channels[i] if i < len(channels) else None
 
-    if count and blob:
-        pos_ch = ch(POSITION)
-        if pos_ch and _real_dimension(pos_ch.get("dimension")):
-            mesh.positions = _decode_channel(blob, stream_offsets, stream_strides, pos_ch, count)[:, :3]
+    pos_ch = ch(POSITION)
+    if pos_ch and _real_dimension(pos_ch.get("dimension")):
+        mesh.positions = _decode_channel(blob, stream_offsets, stream_strides, pos_ch, count)[:, :3]
 
-        nrm_ch = ch(NORMAL)
-        if nrm_ch and _real_dimension(nrm_ch.get("dimension")):
-            decoded = _decode_channel(blob, stream_offsets, stream_strides, nrm_ch, count)
-            candidates = []
-            if decoded is not None and decoded.shape[1] >= 3:
-                candidates.append(decoded[:, :3].astype(np.float32))
-            # A SINGLE-component normal channel is necessarily packed -- a normal
-            # cannot be one number. That is the real test, not the "dimension >
-            # 15" flag-packed spelling, which only some writers use (Endfield
-            # declares a plain 1-component channel, so gating on the flag made
-            # every one of its meshes fall through to no normals at all).
-            # Offer every known packing; the unit-length gate below picks
-            # whichever (if any) is genuinely the encoding used.
-            if decoded is not None and decoded.shape[1] == 1:
-                packed_words = decoded.view(np.uint32).reshape(-1) if decoded.dtype == np.float32 \
-                    else decoded.astype(np.uint32).reshape(-1)
-                candidates.extend(_unpack_normal_10_10_10(packed_words))
-                # Octahedral comes back already normalised, so the unit-length
-                # gate below cannot judge it -- it is resolved against the real
-                # geometry once the triangles exist (see _resolve_packed_normals).
-                packed_candidates.append(_unpack_normal_octahedral(packed_words))
-            for cand in candidates:
-                lengths = np.linalg.norm(cand, axis=1)
-                # Trust stored normals only if they are predominantly unit length.
-                if np.mean(np.abs(lengths - 1.0) < 0.15) > 0.9:
-                    mesh.normals = cand / np.clip(lengths[:, None], 1e-6, None)
-                    break
+    nrm_ch = ch(NORMAL)
+    if nrm_ch and _real_dimension(nrm_ch.get("dimension")):
+        decoded = _decode_channel(blob, stream_offsets, stream_strides, nrm_ch, count)
+        candidates = []
+        if decoded is not None and decoded.shape[1] >= 3:
+            candidates.append(decoded[:, :3].astype(np.float32))
+        # A SINGLE-component normal channel is necessarily packed -- a normal
+        # cannot be one number. That is the real test, not the "dimension >
+        # 15" flag-packed spelling, which only some writers use (Endfield
+        # declares a plain 1-component channel, so gating on the flag made
+        # every one of its meshes fall through to no normals at all).
+        # Offer every known packing; the unit-length gate below picks
+        # whichever (if any) is genuinely the encoding used.
+        if decoded is not None and decoded.shape[1] == 1:
+            packed_words = decoded.view(np.uint32).reshape(-1) if decoded.dtype == np.float32 \
+                else decoded.astype(np.uint32).reshape(-1)
+            candidates.extend(_unpack_normal_10_10_10(packed_words))
+            # Octahedral comes back already normalised, so the unit-length
+            # gate below cannot judge it -- it is resolved against the real
+            # geometry once the triangles exist (see _resolve_packed_normals).
+            packed_candidates.append(_unpack_normal_octahedral(packed_words))
+        for cand in candidates:
+            lengths = np.linalg.norm(cand, axis=1)
+            # Trust stored normals only if they are predominantly unit length.
+            if np.mean(np.abs(lengths - 1.0) < 0.15) > 0.9:
+                mesh.normals = cand / np.clip(lengths[:, None], 1e-6, None)
+                break
 
-        tan_ch = ch(TANGENT)
-        if tan_ch and _real_dimension(tan_ch.get("dimension")) >= 3:
-            t = _decode_channel(blob, stream_offsets, stream_strides, tan_ch, count)
-            tl = np.linalg.norm(t[:, :3], axis=1)
-            if np.mean(np.abs(tl - 1.0) < 0.15) > 0.9:
-                mesh.tangents = t if t.shape[1] == 4 else np.pad(t, ((0, 0), (0, 4 - t.shape[1])), constant_values=1.0)
+    tan_ch = ch(TANGENT)
+    if tan_ch and _real_dimension(tan_ch.get("dimension")) >= 3:
+        t = _decode_channel(blob, stream_offsets, stream_strides, tan_ch, count)
+        tl = np.linalg.norm(t[:, :3], axis=1)
+        if np.mean(np.abs(tl - 1.0) < 0.15) > 0.9:
+            mesh.tangents = t if t.shape[1] == 4 else np.pad(t, ((0, 0), (0, 4 - t.shape[1])), constant_values=1.0)
 
-        col_ch = ch(COLOR)
-        if col_ch and _real_dimension(col_ch.get("dimension")):
-            c = _decode_channel(blob, stream_offsets, stream_strides, col_ch, count)
-            mesh.colors = c if c.shape[1] == 4 else np.pad(c, ((0, 0), (0, 4 - c.shape[1])), constant_values=1.0)
+    col_ch = ch(COLOR)
+    if col_ch and _real_dimension(col_ch.get("dimension")):
+        c = _decode_channel(blob, stream_offsets, stream_strides, col_ch, count)
+        mesh.colors = c if c.shape[1] == 4 else np.pad(c, ((0, 0), (0, 4 - c.shape[1])), constant_values=1.0)
 
-        for layer, ci in enumerate(range(UV0, UV7 + 1)):
-            uch = ch(ci)
-            if uch and _real_dimension(uch.get("dimension")) >= 2:
-                mesh.uvs[layer] = _decode_channel(blob, stream_offsets, stream_strides, uch, count)[:, :2]
+    for layer, ci in enumerate(range(UV0, UV7 + 1)):
+        uch = ch(ci)
+        if uch and _real_dimension(uch.get("dimension")) >= 2:
+            mesh.uvs[layer] = _decode_channel(blob, stream_offsets, stream_strides, uch, count)[:, :2]
 
-        w_ch = ch(BLEND_WEIGHT)
-        i_ch = ch(BLEND_INDICES)
-        has_w = w_ch is not None and _real_dimension(w_ch.get("dimension")) > 0
-        has_i = i_ch is not None and _real_dimension(i_ch.get("dimension")) > 0
-        if has_i:
-            mesh.bone_indices = _decode_channel(blob, stream_offsets, stream_strides, i_ch, count)
-            if has_w:
-                mesh.bone_weights = _decode_channel(blob, stream_offsets, stream_strides, w_ch, count)
-            else:
-                # Indices present without weights: a rigid bind where each
-                # vertex follows a single bone with full weight.
-                weights = np.zeros(mesh.bone_indices.shape, dtype=np.float32)
-                weights[:, 0] = 1.0
-                mesh.bone_weights = weights
+    w_ch = ch(BLEND_WEIGHT)
+    i_ch = ch(BLEND_INDICES)
+    has_w = w_ch is not None and _real_dimension(w_ch.get("dimension")) > 0
+    has_i = i_ch is not None and _real_dimension(i_ch.get("dimension")) > 0
+    if has_i:
+        mesh.bone_indices = _decode_channel(blob, stream_offsets, stream_strides, i_ch, count)
+        if has_w:
+            mesh.bone_weights = _decode_channel(blob, stream_offsets, stream_strides, w_ch, count)
+        else:
+            # Indices present without weights: a rigid bind where each
+            # vertex follows a single bone with full weight.
+            weights = np.zeros(mesh.bone_indices.shape, dtype=np.float32)
+            weights[:, 0] = 1.0
+            mesh.bone_weights = weights
+    return packed_candidates
 
-    # Index buffer and submeshes.
-    index_format = data.get("m_IndexFormat", 0)
-    index_dtype = np.uint16 if index_format == 0 else np.uint32
-    index_size = 2 if index_format == 0 else 4
-    ib_hex = _clean_hex(data.get("m_IndexBuffer"))
-    indices = np.frombuffer(bytes.fromhex(ib_hex), dtype=index_dtype).astype(np.int64) if ib_hex else np.empty(0, np.int64)
 
-    submeshes = data.get("m_SubMeshes") or []
+def _build_triangles(mesh, indices, submesh_dicts, index_size):
+    """Slice the index buffer into per-submesh triangle blocks -- shared
+    between both decode paths (the blob's subMeshes dicts deliberately carry
+    the exact YAML key names)."""
     tris = []
     tri_mat = []
-    for si, sd in enumerate(submeshes):
+    for si, sd in enumerate(submesh_dicts):
         sm = SubMesh(sd, index_size)
         mesh.submeshes.append(sm)
         if sm.topology != 0:
@@ -338,6 +326,31 @@ def decode_mesh(doc):
         mesh.triangles = np.empty((0, 3), np.int32)
         mesh.tri_material = np.empty(0, np.int32)
 
+
+def decode_mesh(doc):
+    """Decode a parsed Mesh document (UnityDocument.data) into a DecodedMesh."""
+    data = doc.data if hasattr(doc, "data") else doc
+    mesh = DecodedMesh(data.get("m_Name", "Mesh"))
+
+    vdata = data.get("m_VertexData") or {}
+    count = vdata.get("m_VertexCount", 0)
+    mesh.vertex_count = count
+    channels = vdata.get("m_Channels") or []
+    blob_hex = _clean_hex(vdata.get("_typelessdata"))
+    blob = bytes.fromhex(blob_hex) if blob_hex else b""
+
+    packed_candidates = []
+    if count and blob:
+        packed_candidates = _decode_vertex_channels(mesh, blob, channels, count)
+
+    # Index buffer and submeshes.
+    index_format = data.get("m_IndexFormat", 0)
+    index_dtype = np.uint16 if index_format == 0 else np.uint32
+    index_size = 2 if index_format == 0 else 4
+    ib_hex = _clean_hex(data.get("m_IndexBuffer"))
+    indices = np.frombuffer(bytes.fromhex(ib_hex), dtype=index_dtype).astype(np.int64) if ib_hex else np.empty(0, np.int64)
+    _build_triangles(mesh, indices, data.get("m_SubMeshes") or [], index_size)
+
     _resolve_packed_normals(mesh, packed_candidates)
 
     # Bind poses (4x4 each, Unity row labels e00..e33 are row-major elements).
@@ -353,6 +366,55 @@ def decode_mesh(doc):
     mesh.bone_name_hashes = _decode_uint_hex(data.get("m_BoneNameHashes"))
 
     mesh.blendshapes = _decode_blendshapes(data.get("m_Shapes") or {})
+    return mesh
+
+
+def decode_mesh_blob(meta_json, payload):
+    """Bridge fast path: decode a MeshRawBlob (JSON index + raw little-endian
+    payload, see Ruri.RipperHook's MeshRawBlob.cs) into the same DecodedMesh
+    the YAML path yields. The vertex/index bytes are the exact bytes the YAML
+    document would have carried as hex text, and every decode rule (formats,
+    packed-normal candidates, trust gates, submesh windows) is the SHARED code
+    above -- so the two paths cannot drift."""
+    import json
+
+    meta = json.loads(meta_json)
+    view = memoryview(payload)
+    sections = meta.get("sections") or {}
+
+    def section(key):
+        entry = sections.get(key)
+        if not entry or not entry.get("len"):
+            return view[:0]
+        return view[entry["off"]:entry["off"] + entry["len"]]
+
+    mesh = DecodedMesh(str(meta.get("name") or "Mesh"))
+    count = int(meta.get("vertexCount") or 0)
+    mesh.vertex_count = count
+
+    blob = section("vertexData")
+    channels = meta.get("channels") or []
+    packed_candidates = []
+    if count and len(blob):
+        packed_candidates = _decode_vertex_channels(mesh, blob, channels, count)
+
+    index_size = int(meta.get("indexSize") or 2)
+    index_dtype = np.uint16 if index_size == 2 else np.uint32
+    index_bytes = section("indexBuffer")
+    indices = np.frombuffer(index_bytes, dtype=index_dtype).astype(np.int64) \
+        if len(index_bytes) else np.empty(0, np.int64)
+    _build_triangles(mesh, indices, meta.get("subMeshes") or [], index_size)
+
+    _resolve_packed_normals(mesh, packed_candidates)
+
+    bind_bytes = section("bindPose")
+    if len(bind_bytes):
+        mesh.bind_poses = np.frombuffer(bind_bytes, dtype="<f4").reshape(-1, 4, 4).copy()
+
+    hash_bytes = section("boneNameHashes")
+    mesh.bone_name_hashes = np.frombuffer(hash_bytes, dtype="<u4").copy() if len(hash_bytes) else None
+
+    mesh.blendshapes = _decode_blendshapes_blob(meta, section("shapeVertices"))
     return mesh
 
 
@@ -417,6 +479,45 @@ def _decode_uint_hex(hexstr):
         return np.frombuffer(bytes.fromhex(cleaned), dtype=np.uint32)
     except ValueError:
         return None
+
+
+def _decode_blendshapes_blob(meta, vertex_bytes):
+    """Blob-side blendshape decode -- same output structure as _decode_blendshapes
+    (name, per-frame weight/has_normals and (index, vertex delta, normal delta)
+    tuples), read straight off the packed 28-byte entries instead of YAML dicts."""
+    channels = meta.get("shapeChannels") or []
+    if not channels:
+        return []
+    frames_meta = meta.get("shapeFrames") or []
+    full_weights = meta.get("fullWeights") or []
+    entry_dtype = np.dtype([("index", "<u4"), ("v", "<f4", (3,)), ("n", "<f4", (3,))])
+    entries = np.frombuffer(vertex_bytes, dtype=entry_dtype) if len(vertex_bytes) else \
+        np.empty(0, dtype=entry_dtype)
+
+    def frame_deltas(first, vcount):
+        rows = entries[first:first + vcount]
+        return [(int(row["index"]),
+                 (float(row["v"][0]), float(row["v"][1]), float(row["v"][2])),
+                 (float(row["n"][0]), float(row["n"][1]), float(row["n"][2])))
+                for row in rows]
+
+    result = []
+    for ci, chan in enumerate(channels):
+        raw_name = chan.get("name")
+        name = str(raw_name) if raw_name is not None else f"blendshape{ci}"
+        frame_index = int(chan.get("frameIndex") or 0)
+        frame_count = int(chan.get("frameCount") or 0)
+        chan_frames = []
+        for fi in range(frame_index, frame_index + frame_count):
+            fr = frames_meta[fi]
+            weight = full_weights[fi] if fi < len(full_weights) else 100.0
+            chan_frames.append({
+                "weight": weight,
+                "deltas": frame_deltas(int(fr.get("firstVertex") or 0), int(fr.get("vertexCount") or 0)),
+                "has_normals": bool(fr.get("hasNormals", 0)),
+            })
+        result.append({"name": name, "frames": chan_frames})
+    return result
 
 
 def _decode_blendshapes(shapes):

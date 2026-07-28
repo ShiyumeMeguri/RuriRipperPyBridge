@@ -237,6 +237,22 @@ def load_mesh(db, mesh_ref, fallback_name=""):
     if not isinstance(mesh_ref, dict) or not mesh_ref.get("guid"):
         return MeshLoad(problem="no_ref", name=fallback_name)
     guid = mesh_ref["guid"]
+
+    # Bridge fast path first: the exporter already handed this mesh's serialized
+    # buffers across raw (see mesh_decoder.decode_mesh_blob) -- no YAML text at
+    # all. A blob only exists when the geometry is plainly in hand, so the empty
+    # case here is genuinely "zero vertices"; compressed/stream-missing meshes
+    # never get a blob and fall through to the YAML document + its diagnosis.
+    blob = db.mesh_blob(guid) if hasattr(db, "mesh_blob") else None
+    if blob is not None:
+        decoded = mesh_decoder.decode_mesh_blob(blob[0], blob[1])
+        name = decoded.name or fallback_name
+        if decoded.positions is None or len(decoded.positions) == 0:
+            return MeshLoad(problem="empty", name=name,
+                            detail="'{0}' decoded to zero vertices.".format(name))
+        dropped = sorted({sm.topology for sm in decoded.submeshes} - {0})
+        return MeshLoad(decoded=decoded, name=name, dropped_topologies=dropped)
+
     mesh_file = db.load_guid(guid)
     if mesh_file is None:
         return MeshLoad(problem="not_found", detail=str(guid), name=fallback_name)
