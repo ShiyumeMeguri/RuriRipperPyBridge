@@ -93,12 +93,16 @@ class TestMatchRatio(unittest.TestCase):
 
 
 class TestHumanoidDetection(unittest.TestCase):
-    def test_muscle_curve_marks_a_clip_humanoid(self):
-        clip = {"m_FloatCurves": [{"attribute": "Spine Front-Back"}]}
-        self.assertTrue(clip_paths.clip_is_humanoid(clip))
+    """Detection keys on the root channels, not the muscle taxonomy: every humanoid clip carries
+    RootT/RootQ, and the ~95 muscle names live with the solver that consumes them (C#), not here.
+    Reaching this predicate at all means the C# humanoid pass did not run."""
 
     def test_root_motion_curve_counts(self):
         clip = {"m_FloatCurves": [{"attribute": "RootT.x"}]}
+        self.assertTrue(clip_paths.clip_is_humanoid(clip))
+
+    def test_root_orientation_curve_counts(self):
+        clip = {"m_FloatCurves": [{"attribute": "RootQ.w"}]}
         self.assertTrue(clip_paths.clip_is_humanoid(clip))
 
     def test_generic_clip_is_not_humanoid(self):

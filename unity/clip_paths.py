@@ -29,7 +29,16 @@ from __future__ import annotations
 import re
 import zlib
 
-from . import clip_curves, muscles
+from . import clip_curves
+
+# Humanoid body motion ships as muscle/root FLOAT curves. Detecting that only needs the root
+# channels' own prefixes -- every humanoid clip carries RootT/RootQ -- not the full muscle
+# taxonomy, which lives on the C# side with the solver that consumes it.
+_ROOT_CHANNEL_PREFIXES = ("RootT.", "RootQ.", "MotionT.", "MotionQ.")
+
+
+def _is_root_channel(attribute):
+    return attribute.startswith(_ROOT_CHANNEL_PREFIXES)
 
 # AssetRipper's placeholder for a binding it could not restore to a string.
 _HASHED_PATH_RE = re.compile(r"^path_0x([0-9A-Fa-f]{1,8})_")
@@ -151,10 +160,8 @@ def clip_is_humanoid(clip_data):
     that a humanoid clip was imported with no Avatar in scope, which silently
     drops the entire body's motion)."""
     if isinstance(clip_data, clip_curves.ClipCurves):
-        return any(muscles.is_muscle(ch.attribute) or muscles.is_root(ch.attribute)
-                   for ch in clip_data.floats)
+        return any(_is_root_channel(ch.attribute) for ch in clip_data.floats)
     for entry in clip_data.get("m_FloatCurves") or []:
-        attribute = entry.get("attribute") or ""
-        if muscles.is_muscle(attribute) or muscles.is_root(attribute):
+        if _is_root_channel(entry.get("attribute") or ""):
             return True
     return False
