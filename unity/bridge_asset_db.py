@@ -26,13 +26,12 @@ class BridgeAssetDatabase:
     bridge. Each guid is parsed at most once and memoized, same caching
     behaviour as the disk AssetDatabase's file cache."""
 
-    def __init__(self, assets, bridge=None, clip_curve_blobs=None):
+    def __init__(self, assets, clip_curve_blobs=None):
         # assets: dict[guid_lower] -> the asset's exported bytes, any format
         # clip_curve_blobs: dict[guid_lower] -> (meta_json, payload_bytes) --
         #   the bridge's zero-parse AnimationClip curve payloads (see
         #   RipperBridge.clip_curves_by_guid / ClipCurveBlob.cs)
         self._assets = assets
-        self._bridge = bridge  # optional: fetch_guid() fallback on a closure miss
         self._file_cache = {}  # guid -> UnityFile
         self._text_cache = {}  # guid -> decoded text, or None when the bytes aren't text
         self._clip_curve_blobs = clip_curve_blobs or {}
@@ -80,8 +79,6 @@ class BridgeAssetDatabase:
         if cached is not None:
             return cached
         text = self._text(guid)
-        if text is None and self._bridge is not None:
-            text = self._bridge.fetch_guid(guid)
         if text is None:
             return None
         unity_file = unity_yaml.UnityFile(guid, unity_yaml.parse_text(text, guid))
