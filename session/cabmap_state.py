@@ -21,6 +21,10 @@ from __future__ import annotations
 
 from ..runtime import pythonnet_bridge
 
+# Holds the loaded cabmap (a multi-second load) and the live bridge session, so a
+# host's script reload skips this module instead of throwing both away.
+HOLDS_PROCESS_STATE = True
+
 DISPLAY_CAP = 500  # max rows ever materialized into the UI at once
 SEARCH_DEBOUNCE_SECONDS = 0.25  # the host's own timer applies this
 

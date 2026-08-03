@@ -24,6 +24,10 @@ from __future__ import annotations
 import os
 import sys
 
+# A claimed CoreCLR runtime can never be re-claimed in this process, so reloading
+# this module would only desync the guards below from what is really loaded.
+HOLDS_PROCESS_STATE = True
+
 _runtime_set = False
 _bridge_type = None
 _bin_dir_override = None

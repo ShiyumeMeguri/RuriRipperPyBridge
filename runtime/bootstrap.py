@@ -53,6 +53,10 @@ import threading
 
 from . import workspace
 
+# Reloading this module resets the install/probe guards below while the worker
+# thread they track is still running, so a host's script reload has to skip it.
+HOLDS_PROCESS_STATE = True
+
 # clr-loader < 0.2.10 mis-parses .NET 10.x version strings ("10.0" -> "10..0"),
 # throwing FrameworkMissingFailure when booting CoreCLR (fixed upstream by
 # pythonnet/clr-loader#104) -- pin past that fix rather than trusting a stale
