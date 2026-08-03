@@ -484,6 +484,32 @@ class RipperBridge:
         ExtractFirstAvailable's C# doc comment)."""
         return bytes(self._bridge.ExtractVfsFile(_string_array(_as_root_list(vfs_roots)), file_name))
 
+    def query_data_table(self, vfs_roots, container_file, column_specs, cancellation=None):
+        """Project one of the game's own self-describing data containers into a
+        column_table.ColumnTable. ``container_file`` is a VFS file name; each
+        entry of ``column_specs`` is (name, path) or (name, path, through_file,
+        through_path), where ``through_file`` resolves the value at ``path`` as
+        a key into that container's own keyed rows -- which is how a roster
+        picks up its localized names. Column 0 of the result is the row key.
+
+        The container declares its own schema, so no binding is generated,
+        checked in, or able to drift; nothing is parsed on this side.
+
+        ``cancellation`` takes a System.Threading.CancellationToken to abort a
+        long read; the whole read/index/project chain honours it."""
+        import System.Threading
+        from . import column_table
+        flat = []
+        for spec in column_specs:
+            name, path = spec[0], spec[1]
+            flat.extend((name, path, spec[2] if len(spec) > 2 else "", spec[3] if len(spec) > 3 else ""))
+        # CancellationToken.None cannot be written as an attribute here: None is a
+        # python keyword, so the member has to be fetched by name.
+        token = cancellation if cancellation is not None \
+            else getattr(System.Threading.CancellationToken, "None")
+        return column_table.ColumnTable.from_packed(self._bridge.QueryDataTable(
+            _string_array(_as_root_list(vfs_roots)), container_file, _string_array(flat), token))
+
     def enumerate_scene_maps(self, vfs_roots):
         """Every distinct map name with streaming-chunk data across vfs_roots."""
         return [str(m) for m in self._bridge.EnumerateSceneMaps(_string_array(_as_root_list(vfs_roots)))]
