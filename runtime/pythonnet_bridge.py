@@ -484,7 +484,18 @@ class RipperBridge:
         ExtractFirstAvailable's C# doc comment)."""
         return bytes(self._bridge.ExtractVfsFile(_string_array(_as_root_list(vfs_roots)), file_name))
 
-    def query_data_table(self, vfs_roots, container_file, column_specs, cancellation=None):
+    def search_data_table(self, table, query):
+        """Row ids of ``table`` (a column_table.ColumnTable from
+        query_data_table) whose text matches ``query`` -- run by the SAME
+        vectorized C# engine the cabmap browser searches with, over the very
+        buffers that table was built from. Nothing is matched on this side.
+        Returns a numpy int32 array."""
+        import numpy as np
+        return np.frombuffer(bytes(self._bridge.SearchDataTable(table.handle, query or "")),
+                             dtype=np.int32)
+
+    def query_data_table(self, vfs_roots, container_file, column_specs,
+                         distinct_by="", prefer_non_empty="", cancellation=None):
         """Project one of the game's own self-describing data containers into a
         column_table.ColumnTable. ``container_file`` is a VFS file name; each
         entry of ``column_specs`` is (name, path) or (name, path, through_file,
@@ -515,7 +526,8 @@ class RipperBridge:
         token = cancellation if cancellation is not None \
             else getattr(System.Threading.CancellationToken, "None")
         return column_table.ColumnTable.from_packed(self._bridge.QueryDataTable(
-            _string_array(_as_root_list(vfs_roots)), container_file, _string_array(flat), token))
+            _string_array(_as_root_list(vfs_roots)), container_file, _string_array(flat),
+            distinct_by, prefer_non_empty, token))
 
     def enumerate_scene_maps(self, vfs_roots):
         """Every distinct map name with streaming-chunk data across vfs_roots."""

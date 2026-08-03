@@ -18,9 +18,10 @@ class ColumnTable:
     """One projected table: ``columns`` in the order C# emitted them, column 0
     always being the row's own key."""
 
-    __slots__ = ("name", "row_count", "names", "_kinds", "_blobs", "_offsets", "_text_cache")
+    __slots__ = ("handle", "name", "row_count", "names", "_kinds", "_blobs", "_offsets", "_text_cache")
 
-    def __init__(self, name, row_count, names, kinds, blobs, offsets):
+    def __init__(self, name, row_count, names, kinds, blobs, offsets, handle=""):
+        self.handle = handle
         self.name = name
         self.row_count = row_count
         self.names = names
@@ -51,7 +52,7 @@ class ColumnTable:
                 offsets.append(None)
             else:
                 raise ValueError(f"unknown column kind {kind!r} for column {names[index]!r}")
-        return cls(str(dto.Name), int(dto.RowCount), names, kinds, blobs, offsets)
+        return cls(str(dto.Name), int(dto.RowCount), names, kinds, blobs, offsets, str(dto.Handle))
 
     def index_of(self, column):
         try:
