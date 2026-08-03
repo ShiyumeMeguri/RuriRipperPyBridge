@@ -502,7 +502,14 @@ class RipperBridge:
         flat = []
         for spec in column_specs:
             name, path = spec[0], spec[1]
-            flat.extend((name, path, spec[2] if len(spec) > 2 else "", spec[3] if len(spec) > 3 else ""))
+            through = spec[2] if len(spec) > 2 else ""
+            through_path = spec[3] if len(spec) > 3 else ""
+            # A join chain may be given as a list of hops; the wire form is ';'-separated.
+            if not isinstance(through, str):
+                through = ";".join(through)
+            if not isinstance(through_path, str):
+                through_path = ";".join(through_path)
+            flat.extend((name, path, through, through_path))
         # CancellationToken.None cannot be written as an attribute here: None is a
         # python keyword, so the member has to be fetched by name.
         token = cancellation if cancellation is not None \
