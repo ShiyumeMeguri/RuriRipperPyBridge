@@ -513,7 +513,8 @@ class RipperBridge:
             "character_id": flat[0],
             "lod_count": int(flat[1] or 0),
             "facial_morph": flat[2],
-            "parts": flat[3:],
+            "avatar_templet": flat[3],
+            "parts": flat[4:],
         }
 
     def search_data_table(self, table, query):
