@@ -484,6 +484,21 @@ class RipperBridge:
         ExtractFirstAvailable's C# doc comment)."""
         return bytes(self._bridge.ExtractVfsFile(_string_array(_as_root_list(vfs_roots)), file_name))
 
+    def npc_prefab_parts(self, vfs_roots, template_id):
+        """What one npc template is assembled from, as
+        {character_id, lod_count, facial_morph, parts}. A generic npc ships no
+        model prefab of its own -- the game builds it out of body/face/hair/ear/
+        tail part prefabs, and only its own per-template manifest lists them.
+        The json is read and parsed on the C# side; nothing is parsed here."""
+        flat = [str(v) for v in self._bridge.NpcPrefabParts(
+            _string_array(_as_root_list(vfs_roots)), template_id)]
+        return {
+            "character_id": flat[0],
+            "lod_count": int(flat[1] or 0),
+            "facial_morph": flat[2],
+            "parts": flat[3:],
+        }
+
     def search_data_table(self, table, query):
         """Row ids of ``table`` (a column_table.ColumnTable from
         query_data_table) whose text matches ``query`` -- run by the SAME
