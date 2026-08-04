@@ -496,6 +496,11 @@ class RipperBridge:
         return {flat[i]: {"model": flat[i + 1], "tag": flat[i + 2], "asset": flat[i + 3]}
                 for i in range(0, len(flat), 4)}
 
+    def npc_prefab_manifest(self, vfs_roots):
+        """Every npc template the game ships an assembled model for."""
+        return [str(v) for v in self._bridge.NpcPrefabManifest(
+            _string_array(_as_root_list(vfs_roots)))]
+
     def npc_prefab_parts(self, vfs_roots, template_id):
         """What one npc template is assembled from, as
         {character_id, lod_count, facial_morph, parts}. A generic npc ships no
