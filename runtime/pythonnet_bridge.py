@@ -36,6 +36,22 @@ _bin_dir_hint = ("Set it in the RuriRipper panel, or set the RURI_RIPPERHOOK_BIN
                  "environment variable.")
 
 
+_texture_formats = ()
+
+
+def set_texture_formats(extensions):
+    """Declare which image containers THIS host can decode, lowercase extensions
+    in preference order ("png", "jpeg", ...). Every texture whose natural
+    (game-authored) container is in the set crosses the bridge byte-identical to
+    a disk export; one that is not is encoded into the first entry instead.
+    Never declaring anything means raw everything -- the unopinionated truth --
+    which is exactly right for a host like Blender that decodes tga/exr natively.
+    The capability is the host's own data: the producer holds no format opinion."""
+    global _texture_formats
+    _texture_formats = tuple((extension or "").strip().lower()
+                             for extension in (extensions or ()) if (extension or "").strip())
+
+
 def set_bin_dir(path):
     """Push the user-configured bin dir in. Takes priority over the provider and
     over RURI_RIPPERHOOK_BIN; an empty value clears it again."""
@@ -631,11 +647,12 @@ class RipperBridge:
         if self._map is None:
             raise RuntimeError("No cabmap loaded -- call load_cab_map()/build_cab_map() first.")
         cab_names = list(cab_names)
+        formats = _string_array(_texture_formats)
         if export_class_ids:
             result = self._bridge.ImportCabsFiltered(self._map, _string_array(cab_names),
-                                                     _int_array(export_class_ids))
+                                                     _int_array(export_class_ids), formats)
         else:
-            result = self._bridge.ImportCabs(self._map, _string_array(cab_names))
+            result = self._bridge.ImportCabs(self._map, _string_array(cab_names), formats)
         # .NET IReadOnlyDictionary crosses into Python as an iterable of
         # KeyValuePair (no dict-like .items()) -- iterate and pull .Key/.Value.
         assets = {str(kvp.Key).lower(): bytes(kvp.Value) for kvp in result.Assets}
