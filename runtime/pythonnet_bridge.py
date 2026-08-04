@@ -361,6 +361,9 @@ class RipperBridge:
         # per-root CAB attribution (RipperBlenderBridge.BuildRootCabs) that lets
         # a UNION closure's roots be split back into their sub-closures.
         self.root_cabs_by_guid = {}
+        # {guid -> exported path (real name + extension)} for the LAST
+        # import_cabs call -- every asset's display identity.
+        self.asset_paths_by_guid = {}
 
     @property
     def hook_ids(self):
@@ -691,6 +694,11 @@ class RipperBridge:
         # co-seeded clip/avatar CABs' rig prefabs.
         self.root_cabs_by_guid = {str(kvp.Key).lower(): str(kvp.Value).lower()
                                   for kvp in result.RootCabs}
+        # guid -> the exported path AssetRipper actually wrote (real name +
+        # container extension). This is the asset's display identity; a host
+        # that names things by guid is a host that never read this.
+        self.asset_paths_by_guid = {str(kvp.Key).lower(): str(kvp.Value)
+                                    for kvp in result.AssetPaths}
         return assets, roots, seed_roots, clips_by_cab, scene_roots
 
     def find_associated_avatar_cabs(self, clip_cab_name):

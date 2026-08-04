@@ -26,15 +26,19 @@ class BridgeAssetDatabase:
     bridge. Each guid is parsed at most once and memoized, same caching
     behaviour as the disk AssetDatabase's file cache."""
 
-    def __init__(self, assets, clip_curve_blobs=None, mesh_blobs=None):
+    def __init__(self, assets, clip_curve_blobs=None, mesh_blobs=None, asset_paths=None):
         # assets: dict[guid_lower] -> the asset's exported bytes, any format
         # clip_curve_blobs: dict[guid_lower] -> (meta_json, payload_bytes) --
         #   the bridge's zero-parse AnimationClip curve payloads (see
         #   RipperBridge.clip_curves_by_guid / ClipCurveBlob.cs)
         # mesh_blobs: dict[guid_lower] -> (meta_json, payload_bytes) -- the mesh
         #   counterpart (RipperBridge.mesh_blobs_by_guid / MeshRawBlob.cs)
+        # asset_paths: dict[guid_lower] -> the exported path AssetRipper wrote
+        #   (real file name + extension) -- every asset's display identity
+        #   (RipperBridge.asset_paths_by_guid)
         self._assets = assets
         self._mesh_blobs = mesh_blobs or {}
+        self._asset_paths = asset_paths or {}
         self._file_cache = {}  # guid -> UnityFile
         self._text_cache = {}  # guid -> decoded text, or None when the bytes aren't text
         self._clip_curve_blobs = clip_curve_blobs or {}
@@ -135,6 +139,23 @@ class BridgeAssetDatabase:
         if not key:
             return None
         return self._assets.get(key.lower())
+
+    def asset_path(self, guid):
+        """The exported path the closure wrote for a guid (real name +
+        container extension), or None for a guid the closure does not hold."""
+        if not guid:
+            return None
+        return self._asset_paths.get(guid.lower())
+
+    def asset_name(self, guid):
+        """The exported file name without its extension -- the asset's own
+        m_Name-derived display name, what any host should label it with."""
+        path = self.asset_path(guid)
+        if not path:
+            return None
+        leaf = path.replace("\\", "/").rsplit("/", 1)[-1]
+        stem = leaf.rsplit(".", 1)[0] if "." in leaf else leaf
+        return stem or None
 
     def all_guids(self):
         """Every guid present in the closure -- for closure-wide scans (e.g.
