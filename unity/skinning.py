@@ -13,7 +13,56 @@ is a later, separate step (``math3d.coordinate``).
 
 from __future__ import annotations
 
+import zlib
+
 import numpy as np
+
+
+def resolve_bone_paths(target_hashes, leaf_names, seed_paths=()):
+    """Reconstruct the Unity transform PATHS a mesh identifies its bones by.
+
+    A mesh stores one CRC32 per bone in ``m_BoneNameHashes``, and Unity hashes a
+    bone's whole root-relative path ("Root/Bip001/Bip001_Pelvis"), not its leaf.
+    A skeleton asset lists only leaf names, with no parentage. But a child's path
+    is its parent's path plus its own name, so every still-unknown hash can be
+    tested against ``<known path>/<leaf>`` -- and each hit is itself a parent for
+    the next round. A top-level bone's path is just its own leaf, which
+    bootstraps the closure with no external seed; ``seed_paths`` adds any full
+    paths already known (e.g. from a sibling rig) as extra parents.
+
+    Returns ``{hash & 0xFFFFFFFF -> full path}`` for every hash that resolved;
+    hashes with no reconstructable path are simply absent. Pure: no host, no
+    game knowledge -- the hashing rule is Unity's."""
+    targets = {int(h) & 0xFFFFFFFF for h in target_hashes}
+    leaves = [name for name in leaf_names if name]
+    resolved = {}
+
+    def consider(path):
+        """Record path if it hashes to a still-unresolved target; True on a hit."""
+        key = zlib.crc32(path.encode("utf-8")) & 0xFFFFFFFF
+        if key in targets and key not in resolved:
+            resolved[key] = path
+            return True
+        return False
+
+    # Seeds are candidate parents whether or not they are themselves targets;
+    # each bare leaf is tried as a top-level path and, if it hits, becomes one.
+    frontier = list(seed_paths)
+    for path in seed_paths:
+        consider(path)
+    for leaf in leaves:
+        if consider(leaf):
+            frontier.append(leaf)
+
+    while frontier and len(resolved) < len(targets):
+        discovered = []
+        for parent in frontier:
+            for leaf in leaves:
+                candidate = parent + "/" + leaf
+                if consider(candidate):
+                    discovered.append(candidate)
+        frontier = discovered
+    return resolved
 
 
 def bake_bind_pose(decoded, smr_bones, file_id_to_world):

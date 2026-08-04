@@ -44,17 +44,31 @@ def _reflection(matrix3):
     return out
 
 
+# 180-degree yaw about the up axis, as a 4x4 (determinant +1). Unity's asset
+# faces +Z; after the Y<->Z swap that lands on Blender +Y, but Blender's front is
+# -Y, so a top-level object is turned by this to face the viewer. Kept separate
+# from the reflection C, which must stay an involution -- a yaw folded into C
+# would break C @ C == I.
+_ROOT_YAW_180 = _reflection(((-1.0, 0.0, 0.0),
+                             (0.0, -1.0, 0.0),
+                             (0.0, 0.0, 1.0)))
+
+
 class Space:
     """One Unity -> target conversion. Immutable; construct the module-level
     constants below rather than one of these per call."""
 
-    __slots__ = ("name", "matrix", "flip_v", "_matrix3", "_perm", "_signs",
-                 "_determinant")
+    __slots__ = ("name", "matrix", "flip_v", "root_rotation", "_matrix3",
+                 "_perm", "_signs", "_determinant")
 
-    def __init__(self, name, matrix3, flip_v):
+    def __init__(self, name, matrix3, flip_v, root_rotation=None):
         self.name = name
         self.matrix = _reflection(matrix3)
         self.flip_v = bool(flip_v)
+        # Applied once to a top-level import object's world matrix, never to
+        # bones, vertices or nested children (see convert_root_matrix).
+        self.root_rotation = (np.eye(4, dtype=np.float64) if root_rotation is None
+                              else np.asarray(root_rotation, dtype=np.float64))
         self._matrix3 = self.matrix[:3, :3]
         self._determinant = float(np.linalg.det(self._matrix3))
         self._perm, self._signs = _signed_permutation(self._matrix3)
@@ -85,6 +99,12 @@ class Space:
     def convert_matrix(self, unity_matrix):
         """Conjugate a Unity 4x4 into this space: ``C @ M @ C`` (float64)."""
         return self.matrix @ np.asarray(unity_matrix, dtype=np.float64) @ self.matrix
+
+    def convert_root_matrix(self, unity_matrix):
+        """convert_matrix plus the once-only top-level yaw: ``R @ C @ M @ C``.
+        For a top-level import object only; det(R) = +1 so winding and tangents
+        are untouched. An identity input yields R itself."""
+        return self.root_rotation @ self.convert_matrix(unity_matrix)
 
     def convert_points(self, points):
         """Convert an (n, 3) array of Unity positions -- or of directions such
@@ -156,12 +176,15 @@ def _signed_permutation(matrix3):
     return tuple(perm), np.asarray(signs, dtype=np.float32)
 
 
-# 4x4 reflection swapping Y and Z (its own inverse).
+# 4x4 reflection swapping Y and Z (its own inverse). The top-level yaw turns the
+# converted asset to face Blender's -Y front.
 BLENDER = Space("blender", ((1.0, 0.0, 0.0),
                             (0.0, 0.0, 1.0),
-                            (0.0, 1.0, 0.0)), flip_v=False)
+                            (0.0, 1.0, 0.0)), flip_v=False,
+                root_rotation=_ROOT_YAW_180)
 
-# 4x4 reflection negating X (its own inverse).
+# 4x4 reflection negating X (its own inverse). glTF's own -X negation already
+# leaves the model facing the viewer, so its top-level rotation is the identity.
 GLTF = Space("gltf", ((-1.0, 0.0, 0.0),
                       (0.0, 1.0, 0.0),
                       (0.0, 0.0, 1.0)), flip_v=True)

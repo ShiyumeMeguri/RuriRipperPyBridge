@@ -114,6 +114,42 @@ class TestSpaceProperties(unittest.TestCase):
                                        space.convert_points(points), atol=1e-6)
 
 
+class TestRootRotation(unittest.TestCase):
+    """The once-only top-level yaw R, orthogonal to the reflection C."""
+
+    def test_root_rotation_determinant_is_plus_one(self):
+        # A rotation, never a reflection -- so winding and tangents are untouched
+        # wherever it is applied.
+        for space in coordinate.SPACES.values():
+            self.assertAlmostEqual(float(np.linalg.det(space.root_rotation[:3, :3])), 1.0)
+
+    def test_blender_is_a_180_yaw_and_gltf_is_identity(self):
+        np.testing.assert_allclose(coordinate.BLENDER.root_rotation,
+                                   np.diag([-1.0, -1.0, 1.0, 1.0]), atol=1e-12)
+        np.testing.assert_allclose(coordinate.GLTF.root_rotation, np.eye(4), atol=1e-12)
+
+    def test_convert_root_matrix_is_R_times_convert_matrix(self):
+        rng = np.random.default_rng(20260804)
+        matrix = rng.normal(size=(4, 4))
+        for space in coordinate.SPACES.values():
+            expected = space.root_rotation @ space.convert_matrix(matrix)
+            np.testing.assert_allclose(space.convert_root_matrix(matrix), expected, atol=1e-12)
+
+    def test_identity_input_yields_R(self):
+        for space in coordinate.SPACES.values():
+            np.testing.assert_allclose(space.convert_root_matrix(np.eye(4)),
+                                       space.root_rotation, atol=1e-12)
+
+    def test_root_yaw_does_not_leak_into_convert_matrix(self):
+        # convert_matrix is still the pure conjugation C @ M @ C: the reflection
+        # is untouched, so its involution below still holds.
+        rng = np.random.default_rng(3)
+        matrix = rng.normal(size=(4, 4))
+        for space in coordinate.SPACES.values():
+            np.testing.assert_allclose(space.convert_matrix(matrix),
+                                       space.matrix @ matrix @ space.matrix, atol=1e-12)
+
+
 class TestUnityTrs(unittest.TestCase):
     def test_identity(self):
         matrix = coordinate.unity_trs({"x": 0, "y": 0, "z": 0},

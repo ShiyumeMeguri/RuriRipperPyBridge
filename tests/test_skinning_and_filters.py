@@ -3,11 +3,65 @@
 from __future__ import annotations
 
 import unittest
+import zlib
 
 import numpy as np
 
 from ..session import cabmap_state
 from ..unity import skinning
+
+
+def _crc(path):
+    return zlib.crc32(path.encode("utf-8")) & 0xFFFFFFFF
+
+
+class TestResolveBonePaths(unittest.TestCase):
+    """The closure that rebuilds Unity transform paths from leaf names + the
+    CRC32 hashes a mesh carries, on a small hand-built tree."""
+
+    # Root/Bip001 splits into a pelvis chain and a head.
+    TREE = ("Root",
+            "Root/Bip001",
+            "Root/Bip001/Bip001_Pelvis",
+            "Root/Bip001/Bip001_Pelvis/Bip001_Spine",
+            "Root/Bip001/Bip001_Head")
+    LEAVES = ("Bip001_Head", "Root", "Bip001", "Bip001_Spine",
+              "Bip001_Pelvis", "UnusedLeaf")
+
+    def test_full_tree_reconstructs_from_bare_leaves(self):
+        hashes = [_crc(path) for path in self.TREE]
+        resolved = skinning.resolve_bone_paths(hashes, self.LEAVES)
+        self.assertEqual({resolved[_crc(p)] for p in self.TREE}, set(self.TREE))
+        self.assertEqual(len(resolved), len(self.TREE))
+
+    def test_parent_before_child_by_construction(self):
+        # Every resolved path's own parent prefix is also resolved -- what lets
+        # the armature builder set edit-bone parents in one pass.
+        hashes = [_crc(path) for path in self.TREE]
+        resolved = skinning.resolve_bone_paths(hashes, self.LEAVES)
+        by_path = set(resolved.values())
+        for path in by_path:
+            parent = path.rsplit("/", 1)[0]
+            if parent != path:
+                self.assertIn(parent, by_path, "parent of %r missing" % path)
+
+    def test_seed_path_bootstraps_when_root_is_not_a_leaf(self):
+        # Drop "Root" from the leaves; a seed path supplies the missing parent.
+        leaves = tuple(name for name in self.LEAVES if name != "Root")
+        hashes = [_crc(path) for path in self.TREE]
+        without_seed = skinning.resolve_bone_paths(hashes, leaves)
+        self.assertNotIn(_crc("Root"), without_seed)
+        with_seed = skinning.resolve_bone_paths(hashes, leaves, seed_paths=("Root",))
+        self.assertEqual({with_seed[_crc(p)] for p in self.TREE}, set(self.TREE))
+
+    def test_unresolvable_hash_is_absent_not_invented(self):
+        hashes = [_crc("Root"), 0xDEADBEEF]
+        resolved = skinning.resolve_bone_paths(hashes, self.LEAVES)
+        self.assertEqual(resolved, {_crc("Root"): "Root"})
+
+    def test_empty_inputs(self):
+        self.assertEqual(skinning.resolve_bone_paths([], []), {})
+        self.assertEqual(skinning.resolve_bone_paths([_crc("X")], []), {})
 
 
 class _Decoded:

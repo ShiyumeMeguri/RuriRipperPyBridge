@@ -63,6 +63,13 @@ def _parse_tos(data):
     return result
 
 
+def transform_paths(data):
+    """Every transform path the avatar's ``m_TOS`` names -- the CRC32(path)->path
+    table for the whole skeleton, which a shared-skeleton part mesh hashes its
+    bones from. Returned as a plain list of full paths (Root/Bip001/...)."""
+    return list(_parse_tos(data).values())
+
+
 def skeleton_nodes(data):
     """The avatar's own embedded skeleton (Generic avatars included): one entry per raw node, in
     m_ParentId's index space -- ``(name, parent_index, (tx,ty,tz), (qw,qx,qy,qz))``. Names resolve
