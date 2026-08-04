@@ -8,9 +8,9 @@ implementation rather than one per host.
 
 The bin dir -- the folder that has to contain BOTH Ruri.RipperHook.dll and
 Ruri.RipperHook.CLI.runtimeconfig.json, typically
-``<checkout>/AssetRipper/Source/0Bins/AssetRipper/Debug`` -- is the one genuinely
+``<checkout>/AssetRipper/Source/0Bins/AssetRipper/Release`` -- is the one genuinely
 machine-specific value here. No repo-root-relative derivation, no
-Release-vs-Debug guessing, nothing hardcoded: it is resolved, in order, from
+configuration guessing, nothing hardcoded: it is resolved, in order, from
 
 1. ``set_bin_dir(path)`` -- what the host pushed in (Blender: its
    AddonPreferences; Painter: its settings file), which is the normal case;
@@ -75,7 +75,7 @@ def _dll_dir():
     if not d:
         raise RuntimeError(
             "No Ruri-RipperHook bin dir configured (the folder containing "
-            "Ruri.RipperHook.dll, e.g. AssetRipper/Source/0Bins/AssetRipper/Debug). "
+            "Ruri.RipperHook.dll, e.g. AssetRipper/Source/0Bins/AssetRipper/Release). "
             + _bin_dir_hint)
     if not os.path.isfile(os.path.join(d, "Ruri.RipperHook.dll")):
         raise RuntimeError(f"Ruri.RipperHook.dll not found in configured bin dir: {d}")
