@@ -484,6 +484,18 @@ class RipperBridge:
         ExtractFirstAvailable's C# doc comment)."""
         return bytes(self._bridge.ExtractVfsFile(_string_array(_as_root_list(vfs_roots)), file_name))
 
+    def read_character_models(self, cab_names):
+        """Each character's authoritative model prefab name and expression-table
+        tag, from the character data assets in cab_names. Returns
+        {character_id: {"model", "tag", "asset"}}. A character's model is NOT
+        derivable from its id -- no config table carries one -- so this asset is
+        the only source. Read and field-extracted on the C# side."""
+        if self._map is None:
+            raise RuntimeError("No cabmap loaded -- call load_cab_map()/build_cab_map() first.")
+        flat = [str(v) for v in self._bridge.ReadCharacterModels(self._map, _string_array(cab_names))]
+        return {flat[i]: {"model": flat[i + 1], "tag": flat[i + 2], "asset": flat[i + 3]}
+                for i in range(0, len(flat), 4)}
+
     def npc_prefab_parts(self, vfs_roots, template_id):
         """What one npc template is assembled from, as
         {character_id, lod_count, facial_morph, parts}. A generic npc ships no
