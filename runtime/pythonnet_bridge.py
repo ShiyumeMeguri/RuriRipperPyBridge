@@ -585,6 +585,30 @@ class RipperBridge:
         """Every distinct map name with streaming-chunk data across vfs_roots."""
         return [str(m) for m in self._bridge.EnumerateSceneMaps(_string_array(_as_root_list(vfs_roots)))]
 
+    def enumerate_scene_chunks(self, vfs_roots, map_name):
+        """Every placement-bearing chunk file of one map -- plain dicts
+        (file_name/family/schema/has_grid/grid_x/grid_y/scene_state_id/area_id/
+        length). Read out of the VFS manifests alone: not one chunk byte is
+        touched, so pricing a 3000-chunk map costs the same as a 90-chunk one.
+        This is what a caller reads to choose a window BEFORE paying for
+        discover_scene_placements. has_grid false means the file's name carries
+        no streaming-grid cell (the map-wide "_Global_" chunks and the whole
+        DynamicStreaming family), so grid_x/grid_y say nothing about it."""
+        return [
+            {
+                "file_name": c.FileName,
+                "family": c.Family,
+                "schema": c.Schema,
+                "has_grid": bool(c.HasGrid),
+                "grid_x": int(c.GridX),
+                "grid_y": int(c.GridY),
+                "scene_state_id": int(c.SceneStateId),
+                "area_id": int(c.AreaId),
+                "length": int(c.Length),
+            }
+            for c in self._bridge.EnumerateSceneChunks(_string_array(_as_root_list(vfs_roots)), map_name)
+        ]
+
     def diagnose_schema_drift(self, vfs_roots, map_name):
         """Binary/vtable-level schema-drift report (list of str lines) for
         map_name's streaming chunks -- flags any FlatBuffers table type
@@ -594,14 +618,23 @@ class RipperBridge:
         return [str(line) for line in
                 self._bridge.DiagnoseSchemaDrift(_string_array(_as_root_list(vfs_roots)), map_name)]
 
-    def discover_scene_placements(self, vfs_roots, map_name):
-        """Every mesh-bearing entity placement for map_name's streaming chunks
-        -- plain dicts (asset_path/asset_hash/entity_name/source_chunk/
-        has_transform/px..sz/material_asset_paths). material_asset_paths is
-        the SAME hash-LUT source as asset_path (FBPropertyAssetData,
-        AssetType==1 instead of ==2) -- the entity's own real material(s),
-        not a naming-convention guess. Cheap: no dependency closure resolved,
-        no CAB loaded -- see DiscoverScenePlacements' C# doc comment."""
+    def discover_scene_placements(self, vfs_roots, map_name, center_x, center_y, radius,
+                                  scene_state_ids=()):
+        """Every mesh-bearing entity placement inside ONE STREAMING WINDOW of
+        map_name -- the disc of `radius` chunk cells around (center_x, center_y)
+        that the running game itself streams, restricted to `scene_state_ids`
+        (empty = every state the map ships). A radius past the map's grid extent
+        is the whole map, which on a real open-world map is a dependency closure
+        no machine holds at once -- price it with enumerate_scene_chunks first.
+
+        Plain dicts (asset_path/asset_hash/entity_name/source_chunk/
+        has_transform/px..sz/material_asset_paths); source_chunk is the chunk's
+        full VFS name, i.e. the key enumerate_scene_chunks lists it under.
+        material_asset_paths is the SAME hash-LUT source as asset_path
+        (FBPropertyAssetData, AssetType==1 instead of ==2) -- the entity's own
+        real material(s), not a naming-convention guess. Cheap: no dependency
+        closure resolved, no CAB loaded -- see DiscoverScenePlacements' C# doc
+        comment, which also covers how the non-grid chunks get bounded."""
         return [
             {
                 "asset_path": p.AssetPath,
@@ -614,7 +647,9 @@ class RipperBridge:
                 "sx": float(p.Sx), "sy": float(p.Sy), "sz": float(p.Sz),
                 "material_asset_paths": [str(m) for m in p.MaterialAssetPaths],
             }
-            for p in self._bridge.DiscoverScenePlacements(_string_array(_as_root_list(vfs_roots)), map_name)
+            for p in self._bridge.DiscoverScenePlacements(
+                _string_array(_as_root_list(vfs_roots)), map_name,
+                int(center_x), int(center_y), int(radius), _int_array(scene_state_ids))
         ]
 
     def import_cabs(self, cab_names, export_class_ids=None):
