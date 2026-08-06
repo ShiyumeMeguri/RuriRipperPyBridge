@@ -585,29 +585,21 @@ class RipperBridge:
         """Every distinct map name with streaming-chunk data across vfs_roots."""
         return [str(m) for m in self._bridge.EnumerateSceneMaps(_string_array(_as_root_list(vfs_roots)))]
 
-    def enumerate_scene_chunks(self, vfs_roots, map_name):
-        """Every placement-bearing chunk file of one map -- plain dicts
-        (file_name/family/schema/has_grid/grid_x/grid_y/scene_state_id/area_id/
-        length). Read out of the VFS manifests alone: not one chunk byte is
-        touched, so pricing a 3000-chunk map costs the same as a 90-chunk one.
-        This is what a caller reads to choose a window BEFORE paying for
-        discover_scene_placements. has_grid false means the file's name carries
-        no streaming-grid cell (the map-wide "_Global_" chunks and the whole
-        DynamicStreaming family), so grid_x/grid_y say nothing about it."""
-        return [
-            {
-                "file_name": c.FileName,
-                "family": c.Family,
-                "schema": c.Schema,
-                "has_grid": bool(c.HasGrid),
-                "grid_x": int(c.GridX),
-                "grid_y": int(c.GridY),
-                "scene_state_id": int(c.SceneStateId),
-                "area_id": int(c.AreaId),
-                "length": int(c.Length),
-            }
-            for c in self._bridge.EnumerateSceneChunks(_string_array(_as_root_list(vfs_roots)), map_name)
-        ]
+    def scene_chunk_summary(self, vfs_roots, map_name):
+        """One map's chunk inventory, summarized to the numbers a caller
+        decides by: its scene states, and the split between cell-anchored
+        chunk files and the map-wide/dynamic ones a window can only bound.
+        Read out of the VFS manifests alone -- not one chunk byte is touched.
+        A summary rather than the file list on purpose: a real map's list is
+        15k rows of interop for what amounts to two labels."""
+        summary = self._bridge.SceneChunkSummary(_string_array(_as_root_list(vfs_roots)), map_name)
+        return {
+            "scene_state_ids": [int(s) for s in summary.SceneStateIds],
+            "anchored_files": int(summary.AnchoredFiles),
+            "anchored_bytes": int(summary.AnchoredBytes),
+            "floating_files": int(summary.FloatingFiles),
+            "floating_bytes": int(summary.FloatingBytes),
+        }
 
     def diagnose_schema_drift(self, vfs_roots, map_name):
         """Binary/vtable-level schema-drift report (list of str lines) for
@@ -637,40 +629,52 @@ class RipperBridge:
         ]
 
     def discover_scene_placements(self, vfs_roots, map_name, min_x, min_z, max_x, max_z,
-                                  scene_state_ids=()):
-        """Every mesh-bearing entity placement inside ONE STREAMING WINDOW of
-        map_name -- the world rect (min_x, min_z)..(max_x, max_z) that the
-        running game itself streams, restricted to `scene_state_ids` (empty =
-        every state the map ships). Pass an infinite rect for the whole map,
-        which on a real open-world map is a dependency closure no machine holds
-        at once -- price it with enumerate_scene_chunks first, or window it by a
-        place the game itself names (see scene_landmarks).
+                                  scene_state_ids=(), lod0_only=True):
+        """What ONE STREAMING WINDOW of map_name places -- the world rect
+        (min_x, min_z)..(max_x, max_z) that the running game itself streams,
+        restricted to `scene_state_ids` (empty = every state the map ships).
+        Pass an infinite rect for the whole map, which on a real open-world map
+        is a dependency closure no machine holds at once -- window it by a place
+        the game itself names instead (see scene_landmarks).
 
-        Plain dicts (asset_path/asset_hash/entity_name/source_chunk/
-        has_transform/px..sz/material_asset_paths); source_chunk is the chunk's
-        full VFS name, i.e. the key enumerate_scene_chunks lists it under.
+        Reduced on the C# side (EndfieldSceneBridge.Reduce), where the raw rows
+        already live: `placements` holds ONLY the importable rows (geometry
+        with a verified transform; one detail level per instance when
+        lod0_only), `seed_paths` is the distinct mesh+material container path
+        set an import needs (feed straight to resolve_cabs_for_paths), and the
+        counts say what was dropped and why. A real window is 10^5 raw rows --
+        filtering after the interop crossing paid for the crossing twice and
+        re-paid the filter on every UI redraw.
+
         material_asset_paths is the SAME hash-LUT source as asset_path
         (FBPropertyAssetData, AssetType==1 instead of ==2) -- the entity's own
         real material(s), not a naming-convention guess. Cheap: no dependency
         closure resolved, no CAB loaded -- see DiscoverScenePlacements' C# doc
         comment, which also covers how the non-grid chunks get bounded."""
-        return [
-            {
-                "asset_path": p.AssetPath,
-                "asset_hash": int(p.AssetHash),
-                "entity_name": p.EntityName,
-                "source_chunk": p.SourceChunk,
-                "has_transform": bool(p.HasTransform),
-                "px": float(p.Px), "py": float(p.Py), "pz": float(p.Pz),
-                "qx": float(p.Qx), "qy": float(p.Qy), "qz": float(p.Qz), "qw": float(p.Qw),
-                "sx": float(p.Sx), "sy": float(p.Sy), "sz": float(p.Sz),
-                "material_asset_paths": [str(m) for m in p.MaterialAssetPaths],
-            }
-            for p in self._bridge.DiscoverScenePlacements(
-                _string_array(_as_root_list(vfs_roots)), map_name,
-                float(min_x), float(min_z), float(max_x), float(max_z),
-                _int_array(scene_state_ids))
-        ]
+        result = self._bridge.DiscoverScenePlacements(
+            _string_array(_as_root_list(vfs_roots)), map_name,
+            float(min_x), float(min_z), float(max_x), float(max_z),
+            _int_array(scene_state_ids), bool(lod0_only))
+        return {
+            "total": int(result.Total),
+            "no_transform": int(result.NoTransform),
+            "lod_filtered": int(result.LodFiltered),
+            "distinct_assets": int(result.DistinctAssets),
+            "seed_paths": [str(path) for path in result.SeedPaths],
+            "placements": [
+                {
+                    "asset_path": p.AssetPath,
+                    "asset_hash": int(p.AssetHash),
+                    "entity_name": p.EntityName,
+                    "source_chunk": p.SourceChunk,
+                    "px": float(p.Px), "py": float(p.Py), "pz": float(p.Pz),
+                    "qx": float(p.Qx), "qy": float(p.Qy), "qz": float(p.Qz), "qw": float(p.Qw),
+                    "sx": float(p.Sx), "sy": float(p.Sy), "sz": float(p.Sz),
+                    "material_asset_paths": [str(m) for m in p.MaterialAssetPaths],
+                }
+                for p in result.Placements
+            ],
+        }
 
     def import_cabs(self, cab_names, export_class_ids=None):
         """Resolve cab_names' dependency closure, load it, export it in-memory, and return
