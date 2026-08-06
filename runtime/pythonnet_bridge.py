@@ -618,14 +618,33 @@ class RipperBridge:
         return [str(line) for line in
                 self._bridge.DiagnoseSchemaDrift(_string_array(_as_root_list(vfs_roots)), map_name)]
 
-    def discover_scene_placements(self, vfs_roots, map_name, center_x, center_y, radius,
+    def scene_landmarks(self, vfs_roots):
+        """Every named place the game's own map UI lists -- plain dicts
+        (level_id/is_single_level/min_x/min_z/max_x/max_z). The rect is the one
+        the game gives that place, and it is exactly what
+        discover_scene_placements takes as a window, so asking for a place by
+        name never involves guessing a coordinate. is_single_level separates a
+        scene that is its own level (a dungeon, a station interior) from a place
+        inside a bigger streaming map."""
+        return [
+            {
+                "level_id": l.LevelId,
+                "is_single_level": bool(l.IsSingleLevel),
+                "min_x": float(l.MinX), "min_z": float(l.MinZ),
+                "max_x": float(l.MaxX), "max_z": float(l.MaxZ),
+            }
+            for l in self._bridge.SceneLandmarks(_string_array(_as_root_list(vfs_roots)))
+        ]
+
+    def discover_scene_placements(self, vfs_roots, map_name, min_x, min_z, max_x, max_z,
                                   scene_state_ids=()):
         """Every mesh-bearing entity placement inside ONE STREAMING WINDOW of
-        map_name -- the disc of `radius` chunk cells around (center_x, center_y)
-        that the running game itself streams, restricted to `scene_state_ids`
-        (empty = every state the map ships). A radius past the map's grid extent
-        is the whole map, which on a real open-world map is a dependency closure
-        no machine holds at once -- price it with enumerate_scene_chunks first.
+        map_name -- the world rect (min_x, min_z)..(max_x, max_z) that the
+        running game itself streams, restricted to `scene_state_ids` (empty =
+        every state the map ships). Pass an infinite rect for the whole map,
+        which on a real open-world map is a dependency closure no machine holds
+        at once -- price it with enumerate_scene_chunks first, or window it by a
+        place the game itself names (see scene_landmarks).
 
         Plain dicts (asset_path/asset_hash/entity_name/source_chunk/
         has_transform/px..sz/material_asset_paths); source_chunk is the chunk's
@@ -649,7 +668,8 @@ class RipperBridge:
             }
             for p in self._bridge.DiscoverScenePlacements(
                 _string_array(_as_root_list(vfs_roots)), map_name,
-                int(center_x), int(center_y), int(radius), _int_array(scene_state_ids))
+                float(min_x), float(min_z), float(max_x), float(max_z),
+                _int_array(scene_state_ids))
         ]
 
     def import_cabs(self, cab_names, export_class_ids=None):
