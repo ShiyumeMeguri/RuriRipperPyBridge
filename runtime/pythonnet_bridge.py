@@ -520,6 +520,29 @@ class RipperBridge:
         return [str(v) for v in self._bridge.NpcPrefabManifest(
             _string_array(_as_root_list(vfs_roots)))]
 
+    def npc_materials(self, cab_names, vfs_roots, template_id):
+        """Which material every submesh of one assembled npc wears --
+        {mesh_name: [container path, ...]} in slot order, plus the part each
+        mesh belongs to. ``cab_names`` is where that npc family's shared
+        assembly table lives; its closure is loaded and decoded on the C# side
+        (the codes and path hashes are binary), so nothing is parsed here.
+
+        An npc's colours come from its TEMPLATE, not from its parts: the same
+        part takes different materials under different templates, so no naming
+        convention can derive them. Requires a loaded cabmap."""
+        if self._map is None:
+            raise RuntimeError("No cabmap loaded -- call load_cab_map()/build_cab_map() first.")
+        rows = self._bridge.ReadNpcMaterials(self._map, _string_array(cab_names),
+                                             _string_array(_as_root_list(vfs_roots)), template_id)
+        return [
+            {
+                "part": str(row.PartName),
+                "mesh": str(row.MeshName),
+                "materials": [str(path) for path in row.Materials],
+            }
+            for row in rows
+        ]
+
     def npc_prefab_parts(self, vfs_roots, template_id):
         """What one npc template is assembled from, as
         {character_id, lod_count, facial_morph, parts}. A generic npc ships no
@@ -533,7 +556,8 @@ class RipperBridge:
             "lod_count": int(flat[1] or 0),
             "facial_morph": flat[2],
             "avatar_templet": flat[3],
-            "parts": flat[4:],
+            "avatar_mesh": flat[4],
+            "parts": flat[5:],
         }
 
     def search_data_table(self, table, query):
