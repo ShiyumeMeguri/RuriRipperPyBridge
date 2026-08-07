@@ -19,17 +19,14 @@ Both are solved by hashing every SUFFIX of every armature path, so the join is
 prefix-agnostic while remaining exact path-structure identity: the same segments
 Unity itself hashed, just re-anchored. This is not display-name guessing.
 
-``clip_data`` throughout is either a parsed AnimationClip document's ``.data``
-dict or a ``clip_curves.ClipCurves`` (the zero-parse bridge payload); both are
-accepted everywhere.
+``clip`` throughout is a ``clip_curves.ClipCurves`` (the zero-parse blob
+payload or the regex disk parser's output) -- the one canonical clip form.
 """
 
 from __future__ import annotations
 
 import re
 import zlib
-
-from . import clip_curves
 
 # Humanoid body motion ships as muscle/root FLOAT curves. Detecting that only needs the root
 # channels' own prefixes -- every humanoid clip carries RootT/RootQ -- not the full muscle
@@ -42,11 +39,6 @@ def _is_root_channel(attribute):
 
 # AssetRipper's placeholder for a binding it could not restore to a string.
 _HASHED_PATH_RE = re.compile(r"^path_0x([0-9A-Fa-f]{1,8})_")
-
-_CURVE_LIST_FIELDS = ("m_RotationCurves", "m_PositionCurves", "m_ScaleCurves",
-                      "m_EulerCurves", "m_FloatCurves")
-_TRANSFORM_CURVE_FIELDS = ("m_RotationCurves", "m_PositionCurves",
-                           "m_ScaleCurves", "m_EulerCurves")
 
 
 def build_suffix_crc_table(path_to_bone):
@@ -79,7 +71,7 @@ def entry_crc(path):
     return zlib.crc32(path.encode("utf-8")) & 0xFFFFFFFF
 
 
-def repair_hashed_clip_paths(clip_data, path_to_bone):
+def repair_hashed_clip_paths(clip, path_to_bone):
     """Rewrite a clip's curve paths (in place) to the target skeleton's own full
     paths, joining through the suffix-CRC table.
 
@@ -90,37 +82,21 @@ def repair_hashed_clip_paths(clip_data, path_to_bone):
     table = build_suffix_crc_table(path_to_bone)
     repaired = 0
     unmatched = 0
-    if isinstance(clip_data, clip_curves.ClipCurves):
-        for channels in clip_data.all_channel_lists():
-            for channel in channels:
-                path = channel.path or ""
-                if not path or path in path_to_bone:
-                    continue
-                real = table.get(entry_crc(path))
-                if real is None:
-                    unmatched += 1
-                    continue
-                channel.path = real
-                repaired += 1
-        return repaired, unmatched
-    for field in _CURVE_LIST_FIELDS:
-        for entry in clip_data.get(field) or []:
-            # "path:" with no value parses to an EXISTING key holding None
-            # (root-level curves) -- `or ""` covers both missing and null, a
-            # .get default only the former.
-            path = entry.get("path") or ""
+    for channels in clip.all_channel_lists():
+        for channel in channels:
+            path = channel.path or ""
             if not path or path in path_to_bone:
                 continue
             real = table.get(entry_crc(path))
             if real is None:
                 unmatched += 1
                 continue
-            entry["path"] = real
+            channel.path = real
             repaired += 1
     return repaired, unmatched
 
 
-def clip_path_match_ratio(clip_data, path_to_bone):
+def clip_path_match_ratio(clip, path_to_bone):
     """Fraction of a clip's transform-curve paths that resolve to a bone of the
     target skeleton -- the compatibility check for importing a clip onto a
     skeleton the user picked. Same suffix-CRC join as the repair, so a clip
@@ -130,19 +106,9 @@ def clip_path_match_ratio(clip_data, path_to_bone):
     table = build_suffix_crc_table(path_to_bone)
     total = 0
     matched = 0
-    if isinstance(clip_data, clip_curves.ClipCurves):
-        for channels in clip_data.transform_channel_lists():
-            for channel in channels:
-                path = channel.path or ""
-                if not path:
-                    continue
-                total += 1
-                if path in path_to_bone or entry_crc(path) in table:
-                    matched += 1
-        return (matched / total if total else 0.0), total
-    for field in _TRANSFORM_CURVE_FIELDS:
-        for entry in clip_data.get(field) or []:
-            path = entry.get("path") or ""  # null-valued for root-level curves
+    for channels in clip.transform_channel_lists():
+        for channel in channels:
+            path = channel.path or ""
             if not path:
                 continue
             total += 1
@@ -151,7 +117,7 @@ def clip_path_match_ratio(clip_data, path_to_bone):
     return (matched / total if total else 0.0), total
 
 
-def clip_is_humanoid(clip_data):
+def clip_is_humanoid(clip):
     """Whether a clip drives a humanoid rig.
 
     Humanoid body motion ships as muscle/root FLOAT curves (attribute names like
@@ -159,9 +125,4 @@ def clip_is_humanoid(clip_data):
     predicate a muscle bake gates on, exposed so a caller can KNOW (e.g. to warn
     that a humanoid clip was imported with no Avatar in scope, which silently
     drops the entire body's motion)."""
-    if isinstance(clip_data, clip_curves.ClipCurves):
-        return any(_is_root_channel(ch.attribute) for ch in clip_data.floats)
-    for entry in clip_data.get("m_FloatCurves") or []:
-        if _is_root_channel(entry.get("attribute") or ""):
-            return True
-    return False
+    return any(_is_root_channel(ch.attribute) for ch in clip.floats)

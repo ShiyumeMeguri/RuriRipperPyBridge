@@ -47,16 +47,17 @@ class BridgeAssetDatabase:
     def mesh_blob(self, guid):
         """The raw (meta_json, payload_bytes) MeshRawBlob for a Mesh guid, or
         None when this closure carries no blob for it (older bridge, a mesh the
-        blob builder declined, or simply not a mesh) -- callers fall back to
-        load_guid + YAML."""
+        blob builder declined, or simply not a mesh)."""
         if not guid:
             return None
         return self._mesh_blobs.get(guid.lower())
 
     def clip_curves(self, guid):
-        """The zero-parse ClipCurves for an AnimationClip guid, or None when
-        this closure carries no blob for it (older bridge, blob build failure,
-        or simply not a clip) -- callers fall back to load_guid + YAML."""
+        """The zero-parse ClipCurves for an AnimationClip guid (the single
+        bridge-mode clip surface; the disk AssetDatabase's same-named method
+        runs the raw-text parser instead) -- or None when this closure carries
+        no blob for it. A selected clip with no blob cannot be imported and is
+        reported, never re-parsed from YAML."""
         if not guid:
             return None
         guid = guid.lower()

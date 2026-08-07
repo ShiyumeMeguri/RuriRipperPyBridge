@@ -110,6 +110,20 @@ class AssetDatabase:
             return self.load_file(path)
         return None
 
+    def clip_curves(self, guid):
+        """The clip's ``clip_curves.ClipCurves`` via the single raw-text parser
+        (``ClipCurves.from_yaml_text`` -- the disk-mode twin of the bridge's
+        zero-parse blob carrier; both databases expose the same surface, so
+        callers never branch on the mode). None when the guid resolves to no
+        readable .anim file. A malformed clip raises instead of importing
+        silently wrong curves."""
+        from . import clip_curves as clip_curves_module
+        path = self.resolve_guid(guid)
+        if not path or not os.path.isfile(path):
+            return None
+        with open(path, "r", encoding="utf-8", errors="replace") as handle:
+            return clip_curves_module.ClipCurves.from_yaml_text(handle.read())
+
     def raw_text(self, guid):
         """Unparsed YAML text for a guid -- disk-mode twin of
         BridgeAssetDatabase.raw_text (same contract: None on a miss), so

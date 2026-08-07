@@ -1,19 +1,20 @@
 """The one canonical in-memory form of a Unity AnimationClip's curves.
 
-Two producers, one consumer surface:
+Two producers, each the single source for its mode, one consumer surface:
 
-- ``ClipCurves.from_blob``  -- the bridge fast path. RipperBlenderBridge hands
-  each exported clip across as a small JSON index plus ONE float32 payload
-  (see Ruri.RipperHook's ClipCurveBlob.cs); every array below is a zero-parse
-  ``numpy.frombuffer`` view of that payload. This replaces re-parsing the same
-  numbers out of 80+MB of YAML text (measured 15.5s for one battle clip).
-- ``ClipCurves.from_document`` -- the YAML path (disk-mode .anim files, or a
-  bridge clip whose blob build failed), ingesting the parsed key dicts in one
-  tight loop per curve.
+- ``ClipCurves.from_blob``  -- bridge mode. RipperBlenderBridge hands each
+  exported clip across as a small JSON index plus ONE float32 payload (see
+  Ruri.RipperHook's ClipCurveBlob.cs); every array below is a zero-parse
+  ``numpy.frombuffer`` view of that payload.
+- ``ClipCurves.from_yaml_text`` -- disk mode. The only clip parser there is:
+  extracted straight off raw .anim YAML text (regexes + numpy's C-level
+  string->float conversion, measured ~3x faster than the generic parser).
+  Self-validating: any structural surprise raises ValueError -- it never
+  returns a silently truncated clip.
 
-Everything downstream (animation_builder's bake, the humanoid muscle bake,
-path repair, humanoid detection) consumes Channels and their vectorized
-``sample`` -- nobody walks YAML key dicts per frame anymore.
+Exactly one of these feeds every consumer (animation_builder's bake, the
+humanoid muscle bake, path repair, humanoid detection) -- there is no third
+parser and no fallback path to the generic YAML parser for clips.
 """
 
 from __future__ import annotations
@@ -25,15 +26,15 @@ import numpy as np
 
 _KIND_DIMENSIONS = {"pos": 3, "rot": 4, "scale": 3, "euler": 3, "float": 1}
 
-# ── raw-text fast path (disk .anim files) ─────────────────────────────────────
+# ── raw-text parser (disk .anim files) ──────────────────────────────────────
 #
 # A big humanoid clip is 80+MB of YAML whose bytes are ~99% keyframe numbers in
 # a rigidly regular shape (grounded against real Unity/AssetRipper output, see
 # from_yaml_text). Extracting them with compiled regexes + numpy's C-level
 # string->float conversion skips the generic YAML parser's per-line python
-# work entirely; every entry self-checks its keyframe count and any mismatch
-# raises, so callers fall back to the full parser rather than import a
-# silently truncated curve.
+# work entirely. Every entry self-checks its keyframe count and any mismatch
+# raises ValueError -- this is the ONLY clip parser, so a Unity format change
+# fails loudly instead of importing a silently wrong curve.
 
 _NUMBER = r"([^\s,}]+)"
 # A section runs until the NEXT top-level "  m_Xxx:" key -- list entries
@@ -264,12 +265,13 @@ class ClipCurves:
 
     @classmethod
     def from_yaml_text(cls, text):
-        """Disk fast path: extract the curves straight out of raw AnimationClip
+        """Disk mode: extract the curves straight out of raw AnimationClip
         YAML text with compiled regexes + numpy string->float conversion --
         the generic YAML parser spends seconds building per-key dicts this
-        never touches. Raises ValueError on ANY structural surprise (keyframe
-        count mismatch, no AnimationClip header) so the caller falls back to
-        the full parser; it never returns a silently truncated clip."""
+        never touches. This is the only clip parser; it raises ValueError on
+        ANY structural surprise (keyframe count mismatch, unexpected section
+        shape, no AnimationClip header) rather than return a silently
+        truncated or misaligned clip."""
         if "AnimationClip:" not in text:
             raise ValueError("not an AnimationClip document")
 
@@ -303,7 +305,9 @@ class ClipCurves:
 
         target = {"rot": clip.rotations, "pos": clip.positions, "scale": clip.scales,
                   "euler": clip.eulers, "float": clip.floats}
+        section_count = 0
         for section in _CURVE_SECTION.finditer(text):
+            section_count += 1
             kind, dimensions = _SECTION_KINDS[section.group(1)]
             pattern = _KEYFRAME_PATTERNS[dimensions]
             for chunk in _ENTRY_SPLIT.split(section.group(2))[1:]:
@@ -356,78 +360,10 @@ class ClipCurves:
                     if class_value is not None and class_value.isdigit():
                         channel.class_id = int(class_value)
                 target[kind].append(channel)
+        if section_count == 0:
+            # Every real AnimationClip document emits all five m_*Curves keys
+            # at a fixed 2-space indent (see _CURVE_SECTION) -- zero matches
+            # means the indent/key layout moved, not that the clip is empty.
+            # Fail loud instead of returning a clip that silently has no curves.
+            raise ValueError("no m_*Curves sections matched -- indentation or key layout changed")
         return clip
-
-    @classmethod
-    def from_document(cls, data):
-        """YAML path: one tight ingestion loop per curve over the parsed key
-        dicts (the m_Curve entries), straight into arrays."""
-        clip = cls()
-        clip.name = data.get("m_Name") or "Clip"
-        clip.sample_rate = float(data.get("m_SampleRate") or 60.0)
-        settings = data.get("m_AnimationClipSettings") or {}
-        clip.start_time = float(settings.get("m_StartTime") or 0.0)
-        clip.stop_time = float(settings.get("m_StopTime") or 0.0)
-        clip.keep_position_xz = bool(settings.get("m_KeepOriginalPositionXZ", True))
-        clip.keep_position_y = bool(settings.get("m_KeepOriginalPositionY", True))
-        clip.keep_orientation = bool(settings.get("m_KeepOriginalOrientation", True))
-
-        for field, target, components in (
-                ("m_RotationCurves", clip.rotations, ("x", "y", "z", "w")),
-                ("m_PositionCurves", clip.positions, ("x", "y", "z")),
-                ("m_ScaleCurves", clip.scales, ("x", "y", "z")),
-                ("m_EulerCurves", clip.eulers, ("x", "y", "z"))):
-            for entry in data.get(field) or []:
-                target.append(_channel_from_entry(entry, components))
-        for entry in data.get("m_FloatCurves") or []:
-            channel = _channel_from_entry(entry, ("v",))
-            channel.attribute = entry.get("attribute") or ""
-            raw_class = entry.get("classID")
-            channel.class_id = int(raw_class) if isinstance(raw_class, (int, float)) else 0
-            clip.floats.append(channel)
-        return clip
-
-
-def _channel_from_entry(entry, components):
-    """One m_Curve key-dict list -> a Channel, single pass. Semantics match
-    the legacy per-key reader exactly: dict values read per component with 0.0
-    defaults, scalar values land in component 0, non-numeric slopes are 0.0,
-    keys sorted by time."""
-    keys = (entry.get("curve") or {}).get("m_Curve") or []
-    key_count = len(keys)
-    dimensions = len(components)
-    times = np.empty(key_count, dtype=np.float64)
-    values = np.zeros((key_count, dimensions), dtype=np.float64)
-    in_slopes = np.zeros((key_count, dimensions), dtype=np.float64)
-    out_slopes = np.zeros((key_count, dimensions), dtype=np.float64)
-
-    for i, key in enumerate(keys):
-        times[i] = key.get("time", 0.0) or 0.0
-        value = key.get("value")
-        in_slope = key.get("inSlope")
-        out_slope = key.get("outSlope")
-        if isinstance(value, dict):
-            in_is_dict = isinstance(in_slope, dict)
-            out_is_dict = isinstance(out_slope, dict)
-            for j, component in enumerate(components):
-                values[i, j] = value.get(component, 0.0) or 0.0
-                if in_is_dict:
-                    in_slopes[i, j] = in_slope.get(component, 0.0) or 0.0
-                if out_is_dict:
-                    out_slopes[i, j] = out_slope.get(component, 0.0) or 0.0
-        else:
-            values[i, 0] = value or 0.0
-            if isinstance(in_slope, (int, float)):
-                in_slopes[i, 0] = in_slope
-            if isinstance(out_slope, (int, float)):
-                out_slopes[i, 0] = out_slope
-
-    if key_count > 1:
-        order = np.argsort(times, kind="stable")
-        if np.any(order != np.arange(key_count)):
-            times = times[order]
-            values = values[order]
-            in_slopes = in_slopes[order]
-            out_slopes = out_slopes[order]
-
-    return Channel(entry.get("path") or "", times, values, in_slopes, out_slopes)
