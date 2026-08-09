@@ -331,6 +331,22 @@ def _int_array(values):
     return System.Array[System.Int32]([int(v) for v in values])
 
 
+def _flat_rules(rules):
+    """Include/Exclude rules in the five-strings-per-rule wire form both search
+    entry points take (field, relation, value, action, enabled). One encoder,
+    because the cabmap browser and every projected/host table are read by the
+    SAME C# rule evaluator -- a second copy here is how the two quietly stop
+    agreeing. ``rules`` is any iterable of objects exposing
+    .field/.relation/.value/.action/.enabled (Blender's rule PropertyGroup is
+    one). None when there are no rules at all, which is what the C# side reads
+    as "no rule stage"."""
+    flat = []
+    for rule in (rules or ()):
+        flat.extend((str(rule.field), str(rule.relation), str(rule.value),
+                     str(rule.action), "1" if rule.enabled else "0"))
+    return _string_array(flat) if flat else None
+
+
 def _as_root_list(vfs_roots):
     """VFS-root parameters accept either one path (str) or a priority-ordered
     list of paths -- normalize to a list so callers don't have to remember
@@ -417,12 +433,7 @@ class RipperBridge:
         if self._map is None:
             raise RuntimeError("No cabmap loaded -- call load_cab_map()/build_cab_map() first.")
         import numpy as np
-        flat = []
-        for rule in (rules or ()):
-            flat.extend((str(rule.field), str(rule.relation), str(rule.value),
-                         str(rule.action), "1" if rule.enabled else "0"))
-        payload = self._bridge.SearchTable(self._map, query or "",
-                                           _string_array(flat) if flat else None,
+        payload = self._bridge.SearchTable(self._map, query or "", _flat_rules(rules),
                                            str(sort_column), int(sort_direction))
         return np.frombuffer(bytes(payload), dtype="<i4")
 
@@ -560,15 +571,40 @@ class RipperBridge:
             "parts": flat[5:],
         }
 
-    def search_data_table(self, table, query):
-        """Row ids of ``table`` (a column_table.ColumnTable from
-        query_data_table) whose text matches ``query`` -- run by the SAME
-        vectorized C# engine the cabmap browser searches with, over the very
-        buffers that table was built from. Nothing is matched on this side.
-        Returns a numpy int32 array."""
+    def search_data_table(self, table_or_handle, query, rules=None):
+        """Row ids of a table matching ``query`` AND every enabled Include/
+        Exclude rule -- run by the SAME vectorized C# engine and the SAME rule
+        evaluator the cabmap browser uses, over the very buffers the table was
+        built from. Nothing is matched on this side.
+
+        Takes either a column_table.ColumnTable (from query_data_table) or a
+        bare handle string (from open_host_table): both name a table the engine
+        already holds. ``rules`` is the same duck type search_table takes, with
+        each rule's field naming a COLUMN of that table. Returns a numpy int32
+        array."""
         import numpy as np
-        return np.frombuffer(bytes(self._bridge.SearchDataTable(table.handle, query or "")),
-                             dtype=np.int32)
+        handle = getattr(table_or_handle, "handle", table_or_handle)
+        payload = self._bridge.SearchDataTable(str(handle), query or "", _flat_rules(rules))
+        return np.frombuffer(bytes(payload), dtype=np.int32)
+
+    def open_host_table(self, handle, columns, rows):
+        """Publish a list THIS side assembled as a searchable table, so it gets
+        the same vectorized search and the same rules as every other list
+        instead of a hand-rolled substring scan.
+
+        ``rows`` is an iterable of per-row sequences, one value per column, in
+        ``columns`` order; everything is sent as text (that is what the rules
+        and the quick search read). Re-publishing under the same handle
+        replaces it, which is what a refreshed list wants. Needs no cabmap and
+        no game hook -- searching is a core capability. Returns the handle."""
+        flat = []
+        for row in rows:
+            values = list(row)
+            if len(values) != len(columns):
+                raise ValueError(f"row has {len(values)} value(s) for {len(columns)} column(s)")
+            flat.extend("" if value is None else str(value) for value in values)
+        return str(self._bridge.OpenHostTable(str(handle), _string_array(list(columns)),
+                                              _string_array(flat)))
 
     def query_data_table(self, vfs_roots, container_file, column_specs,
                          distinct_by="", prefer_non_empty="", cancellation=None):
