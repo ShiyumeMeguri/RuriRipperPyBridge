@@ -70,6 +70,17 @@ def _format_size(fmt):
     return entry[1] if entry else 4
 
 
+ENABLED_PACKINGS = set()
+"""调用方启用的**打包顶点编码**名(空 = 只用标准格式)。
+
+位布局算法本身是通用的(多家引擎都这么压顶点),所以实现留在这里;但"这批资产用的是
+哪一种"只有调用方知道,故必须显式启用 —— 内核绝不按游戏名猜。
+可用名:
+  ``oct20_frame``  一个 32-bit word 装下整个切线帧:bit30 打包标志 /
+                   低 20 位八面体法线对 / bits20-29 切平面内角 snorm10 / bit31 切线手性。
+"""
+
+
 def _unpack_normal_10_10_10(words):
     """Both common R10G10B10A2 normal decodes of a (n,) uint32 word array --
     [SNorm 10-bit, UNorm-remapped 10-bit] -- each as (n,3) float32. The caller
@@ -92,27 +103,14 @@ def _unpack_normal_10_10_10(words):
 
 
 def _unpack_normal_octahedral(words):
-    """Endfield's own packed vertex normal: an OCTAHEDRAL pair in the low 20
-    bits of a 32-bit word, as (n,3) float32.
+    """``oct20_frame`` 的法线半边:32-bit word 低 20 位的 OCTAHEDRAL 对 → (n,3) float32。
 
-    Ported operation-for-operation from the game's own decode
-    (DecompressEndfieldNormal): the low two 10-bit fields are sign-extended and
-    scaled by 1/511 to give the octahedron's (x, y); z is 1 - |x| - |y|; and
-    when z is negative the point is folded back across the octahedron's
-    diagonal -- x' = (1 - |y|) * sign(x), y' = (1 - |x|) * sign(y), with the
-    signs taken from the RAW sign-extended integers and z LEFT negative -- then
-    the whole thing is normalised.
+    低两个 10-bit 字段符号扩展后除以 511 得八面体的 (x, y);z = 1 - |x| - |y|;z 为负时
+    沿八面体对角折回 —— x' = (1-|y|)·sign(x),y' = (1-|x|)·sign(y),符号取自**原始**
+    符号扩展整数、z 保持负值 —— 最后整体归一。
 
-    The third 10-bit field and the two top bits are read by the original decode
-    but never reach its output (its `leng` is dead), so they are ignored here
-    too rather than invented into the result.
-
-    Neither R10G10B10A2 interpretation above can decode this -- an octahedral
-    pair read as three signed channels is not unit length -- which is why every
-    mesh of a model stored this way silently loses its normals: the unit-length
-    trust gate rejects both candidates and the caller falls back to generated
-    normals. Offered as a third candidate so that same gate decides, meaning a
-    model that does NOT use this format can never be mis-decoded by it.
+    两种 R10G10B10A2 读法都解不了它(八面体对当三通道读不是单位长),所以这份候选交给
+    几何相关性判据裁决(_resolve_packed_normals);单位长门对它没有鉴别力。
     """
     words = words.astype(np.uint32)
 
@@ -139,6 +137,36 @@ def _unpack_normal_octahedral(words):
     out = np.stack([x, y, z], axis=1).astype(np.float32)
     lengths = np.linalg.norm(out, axis=1, keepdims=True)
     return out / np.clip(lengths, 1e-12, None)
+
+
+def _unpack_tangent_oct20(words):
+    """``oct20_frame`` 的切线半边:同一个 word 的 bits20-29(切平面内角 snorm10)
+    + bit31(手性)→ (n,4) float32 的 xyz + w。
+
+    参考切线 = Gram-Schmidt(n.yzx - n.zxy) 对法线正交化;内角按对角编码
+    dir2 = (1-2|a|, sign(a)·(1-|1-2|a||)) 归一后投到 [ref, cross(n, ref)] 基上。
+    """
+    words = words.astype(np.uint32)
+    normals = _unpack_normal_octahedral(words)
+
+    ang_raw = ((words >> 20) & 0x3FF).astype(np.int32)
+    ang_raw = np.where(ang_raw >= 512, ang_raw - 1024, ang_raw)
+    ang = ang_raw.astype(np.float32) / 511.0
+
+    ref = normals[:, [1, 2, 0]] - normals[:, [2, 0, 1]]
+    ref = ref - (ref * normals).sum(axis=1, keepdims=True) * normals
+    ref = ref / np.clip(np.linalg.norm(ref, axis=1, keepdims=True), 1e-12, None)
+    bitangent = np.cross(normals, ref)
+    bitangent = bitangent / np.clip(np.linalg.norm(bitangent, axis=1, keepdims=True), 1e-12, None)
+
+    sign = np.where(ang < 0.0, np.float32(-1.0), np.float32(1.0))
+    d0 = 1.0 - (ang * sign) * 2.0
+    d1 = sign * (1.0 - np.abs(d0))
+    norm = np.clip(np.sqrt(d0 * d0 + d1 * d1), 1e-12, None)
+    tangent = (d0 / norm)[:, None] * ref + (d1 / norm)[:, None] * bitangent
+
+    handedness = (((words >> 31) & 1).astype(np.float32) * 2.0) - 1.0
+    return np.concatenate([tangent, handedness[:, None]], axis=1).astype(np.float32)
 
 
 class SubMesh:
@@ -260,7 +288,8 @@ def _decode_vertex_channels(mesh, blob, channels, count):
             # Octahedral comes back already normalised, so the unit-length
             # gate below cannot judge it -- it is resolved against the real
             # geometry once the triangles exist (see _resolve_packed_normals).
-            packed_candidates.append(_unpack_normal_octahedral(packed_words))
+            if "oct20_frame" in ENABLED_PACKINGS:
+                packed_candidates.append(_unpack_normal_octahedral(packed_words))
         for cand in candidates:
             lengths = np.linalg.norm(cand, axis=1)
             # Trust stored normals only if they are predominantly unit length.
@@ -274,6 +303,18 @@ def _decode_vertex_channels(mesh, blob, channels, count):
         tl = np.linalg.norm(t[:, :3], axis=1)
         if np.mean(np.abs(tl - 1.0) < 0.15) > 0.9:
             mesh.tangents = t if t.shape[1] == 4 else np.pad(t, ((0, 0), (0, 4 - t.shape[1])), constant_values=1.0)
+    elif (tan_ch and _real_dimension(tan_ch.get("dimension")) == 1
+            and "oct20_frame" in ENABLED_PACKINGS):
+        # 单分量 TANGENT 通道 = 打包切线帧(一个数装不下切线),按启用的编码解。
+        raw = _decode_channel(blob, stream_offsets, stream_strides, tan_ch, count)
+        words = (np.ascontiguousarray(raw[:, 0], dtype=np.float32).view(np.uint32)
+                 if raw.dtype == np.float32 else raw[:, 0].astype(np.uint32))
+        flagged = float(np.mean((words >> 30) & 1))
+        if flagged > 0.9:
+            mesh.tangents = _unpack_tangent_oct20(words)
+        else:
+            print("[mesh-decoder] 1-comp TANGENT 无 oct20_frame 打包标志(bit30 命中 %.2f),不解"
+                  % flagged, flush=True)
 
     col_ch = ch(COLOR)
     if col_ch and _real_dimension(col_ch.get("dimension")):
