@@ -70,15 +70,38 @@ def _format_size(fmt):
     return entry[1] if entry else 4
 
 
-ENABLED_PACKINGS = set()
-"""调用方启用的**打包顶点编码**名(空 = 只用标准格式)。
+PACKED_CHANNEL_DECODERS = []
+"""调用方注入的**私有打包通道**解码器(内核只内置真正标准的格式)。
 
-位布局算法本身是通用的(多家引擎都这么压顶点),所以实现留在这里;但"这批资产用的是
-哪一种"只有调用方知道,故必须显式启用 —— 内核绝不按游戏名猜。
-可用名:
-  ``oct20_frame``  一个 32-bit word 装下整个切线帧:bit30 打包标志 /
-                   低 20 位八面体法线对 / bits20-29 切平面内角 snorm10 / bit31 切线手性。
+标准格式(R10G10B10A2 的 snorm/unorm 读法)内置在下面;而各家自研的位布局 —— 谁占哪几位、
+哪一位是标志、切线角怎么编 —— 是**资产方的事实**,内核不该知道,故由调用方注册进来:
+
+    fn(channel_index, words) -> (n,3) 法线 / (n,4) 切线 float32,或 None 表示不认领
+
+``channel_index`` 是 Unity VertexAttribute 序号(NORMAL / TANGENT);``words`` 是该通道的
+(n,) uint32 原始字。返回的**法线**候选仍要过内核的几何相关性判据 —— 单位长的编码骗得过
+长度门,只有和真实面法线的相关性能裁决;**切线**没有等价的通用判据,认领即采用。
 """
+
+
+def register_packed_channel_decoder(fn):
+    if fn not in PACKED_CHANNEL_DECODERS:
+        PACKED_CHANNEL_DECODERS.append(fn)
+
+
+def unregister_packed_channel_decoder(fn):
+    if fn in PACKED_CHANNEL_DECODERS:
+        PACKED_CHANNEL_DECODERS.remove(fn)
+
+
+def _injected(channel_index, words):
+    """注册的解码器逐个试;返回全部认领结果(法线可能多个候选)。"""
+    out = []
+    for decoder in PACKED_CHANNEL_DECODERS:
+        got = decoder(channel_index, words)
+        if got is not None:
+            out.append(got)
+    return out
 
 
 def _unpack_normal_10_10_10(words):
@@ -100,73 +123,6 @@ def _unpack_normal_10_10_10(words):
 
     return [np.stack([snorm(x_bits), snorm(y_bits), snorm(z_bits)], axis=1),
             np.stack([unorm(x_bits), unorm(y_bits), unorm(z_bits)], axis=1)]
-
-
-def _unpack_normal_octahedral(words):
-    """``oct20_frame`` 的法线半边:32-bit word 低 20 位的 OCTAHEDRAL 对 → (n,3) float32。
-
-    低两个 10-bit 字段符号扩展后除以 511 得八面体的 (x, y);z = 1 - |x| - |y|;z 为负时
-    沿八面体对角折回 —— x' = (1-|y|)·sign(x),y' = (1-|x|)·sign(y),符号取自**原始**
-    符号扩展整数、z 保持负值 —— 最后整体归一。
-
-    两种 R10G10B10A2 读法都解不了它(八面体对当三通道读不是单位长),所以这份候选交给
-    几何相关性判据裁决(_resolve_packed_normals);单位长门对它没有鉴别力。
-    """
-    words = words.astype(np.uint32)
-
-    def sign_extend_10(bits):
-        bits = bits.astype(np.int32)
-        return np.where(bits >= 512, bits - 1024, bits)
-
-    x_raw = sign_extend_10(words & 0x3FF)
-    y_raw = sign_extend_10((words >> 10) & 0x3FF)
-
-    x = x_raw.astype(np.float32) / 511.0
-    y = y_raw.astype(np.float32) / 511.0
-    z = 1.0 - np.abs(x) - np.abs(y)
-
-    folded = z < 0.0
-    if folded.any():
-        sign_x = np.where(x_raw >= 0, 1.0, -1.0).astype(np.float32)
-        sign_y = np.where(y_raw >= 0, 1.0, -1.0).astype(np.float32)
-        new_x = (1.0 - np.abs(y)) * sign_x
-        new_y = (1.0 - np.abs(x)) * sign_y
-        x = np.where(folded, new_x, x)
-        y = np.where(folded, new_y, y)
-
-    out = np.stack([x, y, z], axis=1).astype(np.float32)
-    lengths = np.linalg.norm(out, axis=1, keepdims=True)
-    return out / np.clip(lengths, 1e-12, None)
-
-
-def _unpack_tangent_oct20(words):
-    """``oct20_frame`` 的切线半边:同一个 word 的 bits20-29(切平面内角 snorm10)
-    + bit31(手性)→ (n,4) float32 的 xyz + w。
-
-    参考切线 = Gram-Schmidt(n.yzx - n.zxy) 对法线正交化;内角按对角编码
-    dir2 = (1-2|a|, sign(a)·(1-|1-2|a||)) 归一后投到 [ref, cross(n, ref)] 基上。
-    """
-    words = words.astype(np.uint32)
-    normals = _unpack_normal_octahedral(words)
-
-    ang_raw = ((words >> 20) & 0x3FF).astype(np.int32)
-    ang_raw = np.where(ang_raw >= 512, ang_raw - 1024, ang_raw)
-    ang = ang_raw.astype(np.float32) / 511.0
-
-    ref = normals[:, [1, 2, 0]] - normals[:, [2, 0, 1]]
-    ref = ref - (ref * normals).sum(axis=1, keepdims=True) * normals
-    ref = ref / np.clip(np.linalg.norm(ref, axis=1, keepdims=True), 1e-12, None)
-    bitangent = np.cross(normals, ref)
-    bitangent = bitangent / np.clip(np.linalg.norm(bitangent, axis=1, keepdims=True), 1e-12, None)
-
-    sign = np.where(ang < 0.0, np.float32(-1.0), np.float32(1.0))
-    d0 = 1.0 - (ang * sign) * 2.0
-    d1 = sign * (1.0 - np.abs(d0))
-    norm = np.clip(np.sqrt(d0 * d0 + d1 * d1), 1e-12, None)
-    tangent = (d0 / norm)[:, None] * ref + (d1 / norm)[:, None] * bitangent
-
-    handedness = (((words >> 31) & 1).astype(np.float32) * 2.0) - 1.0
-    return np.concatenate([tangent, handedness[:, None]], axis=1).astype(np.float32)
 
 
 class SubMesh:
@@ -276,20 +232,18 @@ def _decode_vertex_channels(mesh, blob, channels, count):
             candidates.append(decoded[:, :3].astype(np.float32))
         # A SINGLE-component normal channel is necessarily packed -- a normal
         # cannot be one number. That is the real test, not the "dimension >
-        # 15" flag-packed spelling, which only some writers use (Endfield
-        # declares a plain 1-component channel, so gating on the flag made
-        # every one of its meshes fall through to no normals at all).
+        # 15" flag-packed spelling, which only some writers use: a writer that
+        # declares a plain 1-component channel would fall through to no normals
+        # at all if the flag were the gate.
         # Offer every known packing; the unit-length gate below picks
         # whichever (if any) is genuinely the encoding used.
         if decoded is not None and decoded.shape[1] == 1:
             packed_words = decoded.view(np.uint32).reshape(-1) if decoded.dtype == np.float32 \
                 else decoded.astype(np.uint32).reshape(-1)
             candidates.extend(_unpack_normal_10_10_10(packed_words))
-            # Octahedral comes back already normalised, so the unit-length
-            # gate below cannot judge it -- it is resolved against the real
-            # geometry once the triangles exist (see _resolve_packed_normals).
-            if "oct20_frame" in ENABLED_PACKINGS:
-                packed_candidates.append(_unpack_normal_octahedral(packed_words))
+            # 注入的私有布局多半解出来天然是单位长(如八面体),下面的长度门对它没有
+            # 鉴别力,故一律交给几何相关性判据(_resolve_packed_normals)裁决。
+            packed_candidates.extend(_injected(NORMAL, packed_words))
         for cand in candidates:
             lengths = np.linalg.norm(cand, axis=1)
             # Trust stored normals only if they are predominantly unit length.
@@ -303,18 +257,18 @@ def _decode_vertex_channels(mesh, blob, channels, count):
         tl = np.linalg.norm(t[:, :3], axis=1)
         if np.mean(np.abs(tl - 1.0) < 0.15) > 0.9:
             mesh.tangents = t if t.shape[1] == 4 else np.pad(t, ((0, 0), (0, 4 - t.shape[1])), constant_values=1.0)
-    elif (tan_ch and _real_dimension(tan_ch.get("dimension")) == 1
-            and "oct20_frame" in ENABLED_PACKINGS):
-        # 单分量 TANGENT 通道 = 打包切线帧(一个数装不下切线),按启用的编码解。
+    elif tan_ch and _real_dimension(tan_ch.get("dimension")) == 1:
+        # 一个数装不下切线 ⇒ 私有打包。内核没有标准读法,交注册的解码器认领;
+        # 切线没有等价于法线那样的通用判据,所以首个认领者直接采用。
         raw = _decode_channel(blob, stream_offsets, stream_strides, tan_ch, count)
         words = (np.ascontiguousarray(raw[:, 0], dtype=np.float32).view(np.uint32)
                  if raw.dtype == np.float32 else raw[:, 0].astype(np.uint32))
-        flagged = float(np.mean((words >> 30) & 1))
-        if flagged > 0.9:
-            mesh.tangents = _unpack_tangent_oct20(words)
+        claimed = _injected(TANGENT, words)
+        if claimed:
+            mesh.tangents = claimed[0]
         else:
-            print("[mesh-decoder] 1-comp TANGENT 无 oct20_frame 打包标志(bit30 命中 %.2f),不解"
-                  % flagged, flush=True)
+            print("[mesh-decoder] 单分量 TANGENT 无人认领(未注册对应的打包解码器),切线留空",
+                  flush=True)
 
     col_ch = ch(COLOR)
     if col_ch and _real_dimension(col_ch.get("dimension")):
