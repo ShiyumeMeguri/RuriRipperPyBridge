@@ -104,9 +104,10 @@ class TestMatchRatio(unittest.TestCase):
 
 
 class TestHumanoidDetection(unittest.TestCase):
-    """Detection keys on the root channels, not the muscle taxonomy: every humanoid clip carries
-    RootT/RootQ, and the ~95 muscle names live with the solver that consumes them (C#), not here.
-    Reaching this predicate at all means the C# humanoid pass did not run."""
+    """Detection keys on root channels WITH no transform curves to carry the body: the ~95 muscle
+    names live with the solver that consumes them (C#), not here, but root channels alone are not
+    the signal -- a generic clip ships them too. Reaching this predicate at all means the C#
+    humanoid pass did not run."""
 
     def test_root_motion_curve_counts(self):
         clip = _clip(floats=[_channel("", 1, attribute="RootT.x")])
@@ -119,6 +120,15 @@ class TestHumanoidDetection(unittest.TestCase):
     def test_generic_clip_is_not_humanoid(self):
         clip = _clip(floats=[_channel("", 1, attribute="blendShape.smile")],
                      rotations=[_channel("Root", 4)])
+        self.assertFalse(clip_paths.clip_is_humanoid(clip))
+
+    def test_root_motion_over_transform_curves_is_not_humanoid(self):
+        """The real game's ACL clips: full per-bone tracks AND root-motion floats. Their body
+        motion is right there in the tracks, so no muscle solver is missing."""
+        clip = _clip(floats=[_channel("", 1, attribute="RootT.x"),
+                             _channel("", 1, attribute="MotionQ.w")],
+                     rotations=[_channel("Root/Bip001", 4)],
+                     positions=[_channel("Root/Bip001", 3)])
         self.assertFalse(clip_paths.clip_is_humanoid(clip))
 
 

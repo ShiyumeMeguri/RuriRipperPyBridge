@@ -118,11 +118,17 @@ def clip_path_match_ratio(clip, path_to_bone):
 
 
 def clip_is_humanoid(clip):
-    """Whether a clip drives a humanoid rig.
+    """Whether a clip's body motion is MUSCLE-encoded, and so unreadable here --
+    what a caller warns on (a humanoid clip imported with no Avatar in scope
+    silently drops the entire body's motion, and there is no muscle solver here).
 
-    Humanoid body motion ships as muscle/root FLOAT curves (attribute names like
-    "Spine Front-Back" / "RootT.x"), not as transform curves -- the exact
-    predicate a muscle bake gates on, exposed so a caller can KNOW (e.g. to warn
-    that a humanoid clip was imported with no Avatar in scope, which silently
-    drops the entire body's motion)."""
+    Root channels alone do not say so. A generic clip -- an ACL-compressed one
+    especially -- ships complete per-bone transform tracks AND Unity's own
+    RootT/RootQ/MotionT/MotionQ root-motion channels, so keying on those alone
+    calls every one of them humanoid. What actually distinguishes a muscle clip
+    is that the body's motion is in the floats INSTEAD of transform curves: a
+    clip that binds transform curves already carries its body motion, whatever
+    root-motion metadata rides along with it."""
+    if any(len(channels) for channels in clip.transform_channel_lists()):
+        return False
     return any(_is_root_channel(ch.attribute) for ch in clip.floats)
