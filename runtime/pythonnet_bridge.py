@@ -659,7 +659,20 @@ class RipperBridge:
         return bytes(self._bridge.GameDataBlob(
             self._map, str(dataset_id), _string_array([str(arg) for arg in args]), token))
 
-    def import_cabs(self, cab_names, export_class_ids=None):
+    def scan_cabs(self, cab_names):
+        """Load + process the closure, build the object graph, export NOTHING.
+
+        The graph (see unity/closure_graph.py) answers pure topology questions --
+        which clip does this state play, which avatar does this template name --
+        so a caller resolves identities here, then materializes exactly the assets
+        it needs via import_cabs(export_asset_keys=...). Identity is the game's own
+        deterministic coordinates (collection name, PathID); no export-batch guids
+        cross a call boundary."""
+        self.import_cabs(cab_names, export_class_ids=[], want_graph=True)
+        return self.closure_graph
+
+    def import_cabs(self, cab_names, export_class_ids=None, export_asset_keys=None,
+                    want_graph=False):
         """Resolve cab_names' dependency closure, load it, export it in-memory, and return
         (assets, roots, seed_roots, clips_by_cab, scene_roots): assets is a plain Python dict
         keyed by lowercase guid holding each exported asset's own bytes, whatever AssetRipper
@@ -682,23 +695,28 @@ class RipperBridge:
         stems genuinely differ -- so this map is the ONLY correct way to translate a clip-CAB
         browser row into its real clip documents; never join display names to m_Names.
 
-        export_class_ids: optional ClassID allowlist applied to the EXPORT side only
-        (RipperBlenderBridge.ImportCabsFiltered). The closure is still resolved, loaded and
-        processed in full -- humanoid muscle solve and hashed-curve-path restore need the whole
-        rig in scope -- but only assets of the listed classes are serialized and returned. The
-        standalone-clip flow passes [AnimationClip's id]: its closure co-seeds the entire
-        character for scope, and re-serializing that character's textures/meshes was most of the
-        call's wall time for data the flow never reads."""
+        export_class_ids / export_asset_keys: allowlists applied to the EXPORT side only,
+        AND-ed together. The closure is still resolved, loaded and processed in full --
+        humanoid muscle solve and hashed-curve-path restore need the whole rig in scope --
+        but only admitted assets are serialized and returned. None = unrestricted; an empty
+        class list = export nothing (that is scan_cabs). export_asset_keys entries are
+        "collectionName|pathId" strings (closure_graph.ClosureGraph.key), the game's own
+        deterministic identity -- the single mechanism that makes loading ONE clip out of a
+        2000-clip bundle cost one clip's serialization instead of the whole bundle's.
+
+        want_graph: build the closure's object graph (see scan_cabs). Off by default and
+        deliberately so -- a big closure has millions of reference edges, and a caller that
+        only wants bytes must not pay to index topology it will never read."""
         if self._map is None:
             raise RuntimeError("No cabmap loaded -- call load_cab_map()/build_cab_map() (or use_game(game) "
                                "to select a loaded game's map) first.")
         cab_names = list(cab_names)
         formats = _string_array(_texture_formats)
-        if export_class_ids:
-            result = self._bridge.ImportCabsFiltered(self._map, _string_array(cab_names),
-                                                     _int_array(export_class_ids), formats)
-        else:
-            result = self._bridge.ImportCabs(self._map, _string_array(cab_names), formats)
+        class_ids = None if export_class_ids is None else _int_array(export_class_ids)
+        asset_keys = None if export_asset_keys is None \
+            else _string_array([str(key) for key in export_asset_keys])
+        result = self._bridge.ImportCabs(self._map, _string_array(cab_names), class_ids,
+                                         asset_keys, bool(want_graph), formats)
         # .NET IReadOnlyDictionary crosses into Python as an iterable of
         # KeyValuePair (no dict-like .items()) -- iterate and pull .Key/.Value.
         assets = {str(kvp.Key).lower(): bytes(kvp.Value) for kvp in result.Assets}
@@ -742,5 +760,15 @@ class RipperBridge:
         # that names things by guid is a host that never read this.
         self.asset_paths_by_guid = {str(kvp.Key).lower(): str(kvp.Value)
                                     for kvp in result.AssetPaths}
+        # "collectionName|pathId" -> this batch's exported clip guid: the join
+        # between a graph identity picked in an earlier scan and the bytes/blobs
+        # this call just materialized. Guids never leave the batch; keys do.
+        self.clip_guid_by_key = {str(kvp.Key): str(kvp.Value).lower()
+                                 for kvp in result.ClipGuidByAssetKey}
+        # The closure's object graph, only when this call asked for it -- see
+        # scan_cabs and the want_graph note above.
+        from ..unity import closure_graph
+        self.closure_graph = closure_graph.ClosureGraph.from_blob(
+            str(result.GraphMetaJson), bytes(result.GraphPayload)) if want_graph else None
         return assets, roots, seed_roots, clips_by_cab, scene_roots
 
