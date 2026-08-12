@@ -11,6 +11,17 @@ browser this one mirrors used VirtualMode plus a plain backing list. Each host's
 panel materializes only ``display_window()`` -- a capped, already-filtered
 window -- and nothing else.
 
+Per game, one session. All of that per-cabmap state (rows, folder tree,
+selection, sort, filter, the animation-build handover) lives on a GameSession,
+one per game name, so several games' cabmaps can be open at once and switched
+between without either one throwing the other away -- a CabMapHandle is a pure
+value object and the bridge holds many (see pythonnet_bridge.use_game). ``activate``
+picks the live one; the module-level session-field names (ROWS, VISIBLE,
+CURRENT_DIR, ...) are a read/write VIEW onto whichever session is active, proxied
+through __getattr__/set_select_anchor so every existing ``cabmap_state.ROWS`` reader
+sees the active game with no change. The ONE thing that is genuinely process-wide
+and shared across games is BRIDGE, the CLR session itself.
+
 The one thing that stays with the host is the search DEBOUNCE TIMER, because
 that is a UI event loop's job (``bpy.app.timers`` / ``QTimer``); the policy
 constant it needs (SEARCH_DEBOUNCE_SECONDS) and the work it triggers
@@ -21,61 +32,158 @@ from __future__ import annotations
 
 from ..runtime import pythonnet_bridge
 
-# Holds the loaded cabmap (a multi-second load) and the live bridge session, so a
-# host's script reload skips this module instead of throwing both away.
+# Holds the loaded cabmaps (each a multi-second load) and the live bridge session,
+# so a host's script reload skips this module instead of throwing them away. The
+# per-game sessions (SESSIONS/ACTIVE) and BRIDGE all ride through a reload intact.
 HOLDS_PROCESS_STATE = True
 
 DISPLAY_CAP = 500  # max rows ever materialized into the UI at once
 SEARCH_DEBOUNCE_SECONDS = 0.25  # the host's own timer applies this
 
-ROWS = []       # row_table.RowTable -- the full cabmap, set by load_rows()
-VISIBLE = []    # list[int] -- indices into ROWS after the current filter+sort
-BRIDGE = None   # pythonnet_bridge.RipperBridge | None -- the active session
+# The CLR session, process-wide and shared by every game's cabmap (its _map is
+# switched per game by pythonnet_bridge.use_game). Not session state: a true
+# single bridge for the whole process.
+BRIDGE = None   # pythonnet_bridge.RipperBridge | None
 
-# Folder-browser navigation (see "Virtual folder tree" below). Rebuilt/mutated
-# far too often to live in any host's property system, and nothing here needs to
-# survive a file save.
-CURRENT_DIR = ()          # tuple[str, ...] -- () is the virtual root; segments of the browsed folder
-CURRENT_SUBFOLDERS = []   # list[(name, recursive_file_count)] -- CURRENT_DIR's child folders, alpha-sorted
 
-# Multi-selection lives HERE, not on the displayed window: that window is torn
-# down and rebuilt on every filter/sort/search change, so any per-item host
-# state would be wiped by the very next keystroke. Keyed by cab (the row
-# identity), which also means a selection survives re-sorting and stays attached
-# to the same assets when the visible window scrolls/narrows.
-SELECTED_CABS = set()   # cab keys of every selected row
-SELECT_ANCHOR = None    # ROWS index of the last plainly-clicked row (Shift range anchor)
+# --- Virtual folder tree node -------------------------------------------------
+# Defined before GameSession because a session starts with an empty _ROOT node.
+
+_NO_PATH_BUCKET = "(no virtual path)"  # synthetic root folder for the rare row with zero container paths
+
+
+class _Node:
+    """One folder-tree node, keyed into by its parent's `children` dict under
+    its own path segment -- that segment IS the node's leaf name, so nothing
+    here stores its own name. A node with `children` is browsable as a
+    folder; a node with `files` means at least one row's container path ends
+    exactly here (both can be true at once: some other row's path continues
+    past this one -- rare, but shown as both a folder and a file rather than
+    picking one)."""
+
+    __slots__ = ("children", "files", "file_count")
+
+    def __init__(self):
+        self.children = {}   # str segment -> _Node
+        self.files = []      # list[int] -- ROWS indices whose container path ends exactly here
+        self.file_count = 0  # recursive count of files at or below this node
+
+
+class GameSession:
+    """One game's cabmap browser state. Everything here is about a SINGLE loaded
+    cabmap; a second game gets its own GameSession, and switching between them is
+    ``activate``. The field names match the module-level view names exactly, which
+    is what lets __getattr__ proxy ``cabmap_state.ROWS`` straight through to the
+    active session."""
+
+    __slots__ = ("game", "ROWS", "VISIBLE", "CURRENT_DIR", "CURRENT_SUBFOLDERS",
+                 "SELECTED_CABS", "SELECT_ANCHOR", "ANIMATION_BUILD_STATE",
+                 "_ROOT", "_ROWS_BY_CAB", "_sort_column", "_sort_dir", "_active_rules")
+
+    def __init__(self, game):
+        self.game = game
+        self.ROWS = []             # row_table.RowTable -- the full cabmap, set by load_rows()
+        self.VISIBLE = []          # list[int] -- indices into ROWS after the current filter+sort
+        self.CURRENT_DIR = ()      # tuple[str, ...] -- () is the virtual root; segments of the browsed folder
+        self.CURRENT_SUBFOLDERS = []  # list[(name, recursive_file_count)] -- CURRENT_DIR's child folders, alpha-sorted
+        self.SELECTED_CABS = set()    # cab keys of every selected row
+        self.SELECT_ANCHOR = None     # ROWS index of the last plainly-clicked row (Shift range anchor)
+        self.ANIMATION_BUILD_STATE = None  # animation-build handover dict | None (see below)
+        self._ROOT = _Node()          # virtual folder tree root
+        self._ROWS_BY_CAB = None      # lazily built cab -> row view (see rows_by_cab)
+        self._sort_column = "name"
+        self._sort_dir = 0            # 0 = unsorted (load order), 1 = ascending, 2 = descending
+        self._active_rules = ()       # whatever was last passed to apply_filter()'s `rules` arg
+
+
+# game name (or None for a nameless / not-yet-recognised session) -> GameSession.
+SESSIONS = {}
+# The session every module-level session-field name currently views.
+ACTIVE = None
+
+
+def session_for(game):
+    """The GameSession for ``game`` (a GameType member name, or None for the
+    nameless session a plain un-hooked Unity build browses under), created empty
+    on first use."""
+    session = SESSIONS.get(game)
+    if session is None:
+        session = GameSession(game)
+        SESSIONS[game] = session
+    return session
+
+
+def activate(game):
+    """Make ``game``'s session the live one every ``cabmap_state.<field>`` view
+    reads. When BRIDGE already has that game's cabmap loaded, the bridge's own
+    _map/decoder is switched in lockstep (use_game), so a search or import against
+    the active session hits the right cabmap and there is no way to leave the model
+    and the bridge disagreeing about which game is current. A game with no loaded
+    map yet (session created, cabmap not built/loaded) just switches the Python
+    view."""
+    global ACTIVE
+    ACTIVE = session_for(game)
+    if BRIDGE is not None and game in BRIDGE.maps_by_game:
+        BRIDGE.use_game(game)
+    return ACTIVE
+
+
+def active_game():
+    """The game name the live session is for, or None for the nameless session."""
+    return ACTIVE.game if ACTIVE is not None else None
+
+
+# The names that are a VIEW onto ACTIVE rather than real module attributes.
+# __getattr__ (PEP 562, only called on a normal-lookup miss) resolves each read
+# to the live session; writes to SELECT_ANCHOR go through set_select_anchor. None
+# of these is ever assigned at module scope -- doing so would shadow the proxy.
+_SESSION_FIELDS = frozenset({
+    "ROWS", "VISIBLE", "CURRENT_DIR", "CURRENT_SUBFOLDERS",
+    "SELECTED_CABS", "SELECT_ANCHOR", "ANIMATION_BUILD_STATE",
+    "_ROOT", "_ROWS_BY_CAB", "_sort_column", "_sort_dir", "_active_rules",
+})
+
+
+def __getattr__(name):
+    if name in _SESSION_FIELDS:
+        return getattr(ACTIVE, name)
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
+
+ACTIVE = session_for(None)  # a nameless default session so the module works before any game is picked
 
 
 def clear_selection():
-    global SELECT_ANCHOR
-    SELECTED_CABS.clear()
-    SELECT_ANCHOR = None
+    ACTIVE.SELECTED_CABS.clear()
+    ACTIVE.SELECT_ANCHOR = None
+
+
+def set_select_anchor(row_index):
+    """Set the Shift-range anchor on the active session -- the one session field a
+    host writes back (a click's anchor), so it gets an explicit setter rather than
+    a bare module-attribute assignment the read-only view proxy could not catch."""
+    ACTIVE.SELECT_ANCHOR = row_index
 
 
 def selected_row_indices():
     """Selected rows as ROWS indices, in master ROWS order -- the deterministic
     order a batch import runs in (not click order, which nobody can
     reproduce)."""
-    if not SELECTED_CABS or not len(ROWS):
+    if not ACTIVE.SELECTED_CABS or not len(ACTIVE.ROWS):
         return []
-    index_of = ROWS.cab_to_index()
-    return sorted(index_of[cab] for cab in SELECTED_CABS if cab in index_of)
+    index_of = ACTIVE.ROWS.cab_to_index()
+    return sorted(index_of[cab] for cab in ACTIVE.SELECTED_CABS if cab in index_of)
 
 
 def selected_row_dicts():
     """The same selection as row views (dict-compatible)."""
-    return [ROWS[i] for i in selected_row_indices()]
+    return [ACTIVE.ROWS[i] for i in selected_row_indices()]
 
 
 def selected_cabs():
     """The same selection as bare cab names -- what import_cabs() seeds."""
-    return [ROWS.cab(i) for i in selected_row_indices()]
+    return [ACTIVE.ROWS.cab(i) for i in selected_row_indices()]
 
-
-_sort_column = "name"
-_sort_dir = 0  # 0 = unsorted (load order), 1 = ascending, 2 = descending
-_active_rules = ()  # whatever was last passed to apply_filter()'s `rules` arg
 
 # --- Process-Monitor-style Include/Exclude rules. The DATA shape only: matching
 # lives in the ONE C# engine (CabTableSearch, the same implementation behind the
@@ -120,22 +228,24 @@ class Rule:
 
 
 def reset():
-    global ROWS, VISIBLE, BRIDGE, _sort_dir, _ROWS_BY_CAB
-    global CURRENT_DIR, CURRENT_SUBFOLDERS, _ROOT
-    ROWS = []
-    VISIBLE = []
-    BRIDGE = None
-    _sort_dir = 0
-    _ROWS_BY_CAB = None
-    CURRENT_DIR = ()
-    CURRENT_SUBFOLDERS = []
-    _ROOT = _Node()
+    """Reset the ACTIVE session back to empty (its rows, folder tree, selection,
+    sort and animation handover). Only the current session -- the other games'
+    sessions and the process-wide BRIDGE are left alone, matching HOLDS_PROCESS_STATE:
+    a reset is "clear what I'm looking at", not "throw away the CLR runtime and every
+    loaded cabmap"."""
+    ACTIVE.ROWS = []
+    ACTIVE.VISIBLE = []
+    ACTIVE._sort_dir = 0
+    ACTIVE._ROWS_BY_CAB = None
+    ACTIVE.CURRENT_DIR = ()
+    ACTIVE.CURRENT_SUBFOLDERS = []
+    ACTIVE._ROOT = _Node()
     clear_selection()
     clear_animation_build_state()
 
 
 def ensure_bridge(hook_ids):
-    """Get (or lazily create) the session's one active bridge, with its hook selection kept in
+    """Get (or lazily create) the process-wide bridge, with its hook selection kept in
     sync with hook_ids on every call -- NOT just on first construction.
 
     Root-cause fix (2026-07-18): this used to construct RipperBridge(hook_ids) once and return
@@ -183,17 +293,15 @@ def ensure_bridge(hook_ids):
 #
 # The values are opaque here on purpose -- ``arm_name`` and
 # ``path_to_meshobjects`` mean whatever the host's own builder put in them.
-# This module only guarantees the handover survives between the two clicks.
-
-ANIMATION_BUILD_STATE = None
-# dict(db=..., arm_name=..., maps=..., path_to_meshobjects=..., seed_cabs=[...], options=...) | None
+# This module only guarantees the handover survives between the two clicks. It
+# rides on the active session, so each game's in-progress animation build is its
+# own.
 
 
 def set_animation_build_state(db, arm_name, maps, path_to_meshobjects):
     """A character was just FULLY imported (mesh/skeleton/materials already
     built) -- record its real post-build fields immediately."""
-    global ANIMATION_BUILD_STATE
-    ANIMATION_BUILD_STATE = {
+    ACTIVE.ANIMATION_BUILD_STATE = {
         "db": db,
         "arm_name": arm_name,
         "maps": maps,
@@ -211,8 +319,7 @@ def set_animation_discovery_state(seed_cabs, options):
     time). seed_cabs is a LIST -- discovery runs over the whole multi-
     selection, and the lazy build must co-seed every one of them or clips
     discovered from the extra rows would never resolve in clips_by_cab."""
-    global ANIMATION_BUILD_STATE
-    ANIMATION_BUILD_STATE = {
+    ACTIVE.ANIMATION_BUILD_STATE = {
         "db": None,
         "arm_name": None,
         "maps": None,
@@ -226,39 +333,35 @@ def mark_animation_build_done(db, arm_name, maps, path_to_meshobjects):
     """Fill in the real post-build fields once the lazy full import has actually
     happened, so a second click attaches more clips to the SAME armature instead
     of re-importing."""
-    if ANIMATION_BUILD_STATE is not None:
-        ANIMATION_BUILD_STATE["db"] = db
-        ANIMATION_BUILD_STATE["arm_name"] = arm_name
-        ANIMATION_BUILD_STATE["maps"] = maps
-        ANIMATION_BUILD_STATE["path_to_meshobjects"] = path_to_meshobjects
+    if ACTIVE.ANIMATION_BUILD_STATE is not None:
+        ACTIVE.ANIMATION_BUILD_STATE["db"] = db
+        ACTIVE.ANIMATION_BUILD_STATE["arm_name"] = arm_name
+        ACTIVE.ANIMATION_BUILD_STATE["maps"] = maps
+        ACTIVE.ANIMATION_BUILD_STATE["path_to_meshobjects"] = path_to_meshobjects
 
 
 def clear_animation_build_state():
-    global ANIMATION_BUILD_STATE
-    ANIMATION_BUILD_STATE = None
+    ACTIVE.ANIMATION_BUILD_STATE = None
 
 
 def load_rows(preferred_dir=()):
-    """Pull every row from the currently-loaded cabmap into ROWS and point the
-    browser at ``preferred_dir`` (the virtual root when omitted). ROWS is a
-    columnar row_table.RowTable -- indexing/iteration yield dict-compatible row
-    views, so per-row consumers are unchanged while the hot paths (search/sort/
-    window) run columnar.
+    """Pull every row from the currently-loaded cabmap into the active session's
+    ROWS and point the browser at ``preferred_dir`` (the virtual root when
+    omitted). ROWS is a columnar row_table.RowTable -- indexing/iteration yield
+    dict-compatible row views, so per-row consumers are unchanged while the hot
+    paths (search/sort/window) run columnar. Reads the bridge's CURRENT _map, so
+    the caller selects the game first (activate / use_game).
 
     ``preferred_dir`` lets a host restore the folder the user was last browsing
     instead of dumping them back at the root on every Load; a path that no
     longer exists in THIS map (a different game, a renamed folder) simply falls
     back to the root -- see browse_dir."""
-    global ROWS, _ROWS_BY_CAB
     if BRIDGE is None:
         raise RuntimeError("No bridge session -- call ensure_bridge() first.")
-    ROWS = BRIDGE.enumerate_table()
-    _ROWS_BY_CAB = None  # rebuilt lazily on first rows_by_cab() call
-    clear_selection()    # cab keys from a previous map mean nothing in this one
+    ACTIVE.ROWS = BRIDGE.enumerate_table()
+    ACTIVE._ROWS_BY_CAB = None  # rebuilt lazily on first rows_by_cab() call
+    clear_selection()           # cab keys from a previous map mean nothing in this one
     _build_tree(preferred_dir)  # also sets CURRENT_DIR/VISIBLE/CURRENT_SUBFOLDERS
-
-
-_ROWS_BY_CAB = None  # dict[str, dict] -- lazily built cab -> row index, see rows_by_cab()
 
 
 class _RowsByCab:
@@ -286,10 +389,9 @@ def rows_by_cab():
     to look up TypeNames/Name for a batch of dependency-closure CAB names
     (see resolve_closure_cab_names) without an O(closure_size * len(ROWS))
     linear scan."""
-    global _ROWS_BY_CAB
-    if _ROWS_BY_CAB is None:
-        _ROWS_BY_CAB = _RowsByCab(ROWS)
-    return _ROWS_BY_CAB
+    if ACTIVE._ROWS_BY_CAB is None:
+        ACTIVE._ROWS_BY_CAB = _RowsByCab(ACTIVE.ROWS)
+    return ACTIVE._ROWS_BY_CAB
 
 
 # --- Virtual folder tree ------------------------------------------------------
@@ -301,31 +403,9 @@ def rows_by_cab():
 # O(children of that folder), so opening a folder never rescans ROWS the way
 # an ad-hoc per-click scan would.
 
-_NO_PATH_BUCKET = "(no virtual path)"  # synthetic root folder for the rare row with zero container paths
-
-
-class _Node:
-    """One folder-tree node, keyed into by its parent's `children` dict under
-    its own path segment -- that segment IS the node's leaf name, so nothing
-    here stores its own name. A node with `children` is browsable as a
-    folder; a node with `files` means at least one row's container path ends
-    exactly here (both can be true at once: some other row's path continues
-    past this one -- rare, but shown as both a folder and a file rather than
-    picking one)."""
-
-    __slots__ = ("children", "files", "file_count")
-
-    def __init__(self):
-        self.children = {}   # str segment -> _Node
-        self.files = []      # list[int] -- ROWS indices whose container path ends exactly here
-        self.file_count = 0  # recursive count of files at or below this node
-
-
-_ROOT = _Node()
-
 
 def _add_leaf(segments, row_index):
-    node = _ROOT
+    node = ACTIVE._ROOT
     for seg in segments:
         child = node.children.get(seg)
         if child is None:
@@ -351,12 +431,12 @@ def _build_tree(preferred_dir=()):
     is only ever iterated here, never used as a dict key) -- ~45% faster at
     real cabmap scale (260k rows, confirmed by measurement), worth it since
     this runs synchronously inside the Build/Load operator."""
-    global _ROOT
-    _ROOT = _Node()
-    path_count_of = ROWS.container_path_count
-    path_of = ROWS.container_path
-    cab_of = ROWS.cab
-    for index in range(len(ROWS)):
+    ACTIVE._ROOT = _Node()
+    rows = ACTIVE.ROWS
+    path_count_of = rows.container_path_count
+    path_of = rows.container_path
+    cab_of = rows.cab
+    for index in range(len(rows)):
         placed = False
         for p in range(path_count_of(index)):
             segments = [s for s in path_of(index, p).split("/") if s]
@@ -379,10 +459,11 @@ def folder_of(row_index, path_index=0):
     key_to_dir for that round trip. path_index is clamped, not validated -- callers
     that don't care which of a multi-path row's folders they land in (the
     common case) can just pass the default 0."""
-    path_count = ROWS.container_path_count(row_index)
+    rows = ACTIVE.ROWS
+    path_count = rows.container_path_count(row_index)
     if path_count == 0:
         return (_NO_PATH_BUCKET,)
-    path = ROWS.container_path(row_index, min(max(path_index, 0), path_count - 1))
+    path = rows.container_path(row_index, min(max(path_index, 0), path_count - 1))
     segments = [s for s in path.split("/") if s]
     return tuple(segments[:-1])
 
@@ -409,27 +490,28 @@ def best_path_index_for_jump(row_index, query):
     - Falls back to path 0 when neither applies (e.g. the row matched via a
       different field -- Type/Source -- or purely through an Include/Exclude
       rule with no plain search text typed)."""
-    path_count = ROWS.container_path_count(row_index)
+    rows = ACTIVE.ROWS
+    path_count = rows.container_path_count(row_index)
     if path_count <= 1:
         return 0
 
     needle = (query or "").strip().lower()
     if not needle:
-        depth = len(CURRENT_DIR)
+        depth = len(ACTIVE.CURRENT_DIR)
         for p in range(path_count):
-            segments = tuple(s for s in ROWS.container_path(row_index, p).split("/") if s)
-            if len(segments) == depth + 1 and segments[:depth] == CURRENT_DIR:
+            segments = tuple(s for s in rows.container_path(row_index, p).split("/") if s)
+            if len(segments) == depth + 1 and segments[:depth] == ACTIVE.CURRENT_DIR:
                 return p
         return 0
 
     for p in range(path_count):
-        if needle in ROWS.container_path(row_index, p).lower():
+        if needle in rows.container_path(row_index, p).lower():
             return p
     return 0
 
 
 def _node_at(path):
-    node = _ROOT
+    node = ACTIVE._ROOT
     for seg in path:
         node = node.children.get(seg)
         if node is None:
@@ -443,11 +525,10 @@ def browse_dir(path):
     folder's own children -- O(children), never O(len(ROWS)). An unreachable
     path (e.g. CURRENT_DIR from a since-replaced cabmap) falls back to root
     rather than showing a dead end."""
-    global CURRENT_DIR, VISIBLE, CURRENT_SUBFOLDERS
     node = _node_at(path)
     if node is None:
-        path, node = (), _ROOT
-    CURRENT_DIR = tuple(path)
+        path, node = (), ACTIVE._ROOT
+    ACTIVE.CURRENT_DIR = tuple(path)
     subfolders = []
     files = []
     for name, child in node.children.items():
@@ -456,15 +537,15 @@ def browse_dir(path):
         if child.files:     # a row's container path ends exactly here -> also a file entry
             files.extend(child.files)
     subfolders.sort(key=lambda pair: pair[0].lower())
-    CURRENT_SUBFOLDERS = subfolders
-    VISIBLE = files
+    ACTIVE.CURRENT_SUBFOLDERS = subfolders
+    ACTIVE.VISIBLE = files
     _apply_sort()
 
 
 def dir_to_key(path=None):
     """The browsed folder as the flat "a/b/c" string a host persists (empty at
     the root). Defaults to CURRENT_DIR, i.e. "remember where I am now"."""
-    return "/".join(CURRENT_DIR if path is None else path)
+    return "/".join(ACTIVE.CURRENT_DIR if path is None else path)
 
 
 def key_to_dir(key):
@@ -491,12 +572,11 @@ def refresh_visible(query, rules=()):
     branch runs and skips apply_filter entirely -- so a later debounced
     search (reapply_filter, which only has the cached rules to go on) never
     fires against a stale or since-removed rule set."""
-    global _active_rules
-    _active_rules = tuple(rules)
+    ACTIVE._active_rules = tuple(rules)
     if has_active_query(query, rules):
         apply_filter(query, rules)
     else:
-        browse_dir(CURRENT_DIR)
+        browse_dir(ACTIVE.CURRENT_DIR)
 
 
 def leaf_name_in_current_dir(index):
@@ -507,12 +587,13 @@ def leaf_name_in_current_dir(index):
     shown in here. Falls back to that default if, somehow, none of the row's
     paths match (shouldn't happen for anything browse_dir actually placed in
     VISIBLE)."""
-    depth = len(CURRENT_DIR)
-    for p in range(ROWS.container_path_count(index)):
-        segments = tuple(s for s in ROWS.container_path(index, p).split("/") if s)
-        if len(segments) == depth + 1 and segments[:depth] == CURRENT_DIR:
+    rows = ACTIVE.ROWS
+    depth = len(ACTIVE.CURRENT_DIR)
+    for p in range(rows.container_path_count(index)):
+        segments = tuple(s for s in rows.container_path(index, p).split("/") if s)
+        if len(segments) == depth + 1 and segments[:depth] == ACTIVE.CURRENT_DIR:
             return segments[-1]
-    return ROWS.name(index)
+    return rows.name(index)
 
 
 def apply_filter(query, rules=()):
@@ -524,15 +605,14 @@ def apply_filter(query, rules=()):
     result set over the whole cabmap, never scoped to CURRENT_DIR -- see
     refresh_visible for how this and the folder browser (browse_dir) dispatch
     between each other."""
-    global VISIBLE, _active_rules, CURRENT_SUBFOLDERS
     rules = tuple(rules)
-    _active_rules = rules
-    CURRENT_SUBFOLDERS = []
+    ACTIVE._active_rules = rules
+    ACTIVE.CURRENT_SUBFOLDERS = []
     if BRIDGE is None:
-        VISIBLE = []
+        ACTIVE.VISIBLE = []
         return
-    VISIBLE = BRIDGE.search_table((query or "").strip(), rules,
-                                  _sort_column, _sort_dir).tolist()
+    ACTIVE.VISIBLE = BRIDGE.search_table((query or "").strip(), rules,
+                                         ACTIVE._sort_column, ACTIVE._sort_dir).tolist()
 
 
 def reapply_filter(query):
@@ -541,39 +621,37 @@ def reapply_filter(query):
     set. Routes through refresh_visible, not apply_filter directly, so an empty
     query clearing back to no-rules-either correctly lands back in the folder
     browser instead of a stale flat view."""
-    refresh_visible(query, _active_rules)
+    refresh_visible(query, ACTIVE._active_rules)
 
 
 def active_rules():
     """The rule set the current VISIBLE was computed with."""
-    return _active_rules
+    return ACTIVE._active_rules
 
 
 def _apply_sort():
-    global VISIBLE
-    if _sort_dir == 0:
-        VISIBLE.sort()  # back to load order
+    if ACTIVE._sort_dir == 0:
+        ACTIVE.VISIBLE.sort()  # back to load order
         return
-    if BRIDGE is None or not VISIBLE:
+    if BRIDGE is None or not ACTIVE.VISIBLE:
         return
     # Same C# engine as apply_filter, over the current id set (the folder
     # view's listing, or a re-click on an already-filtered result).
-    VISIBLE = BRIDGE.sort_rows(VISIBLE, _sort_column, _sort_dir).tolist()
+    ACTIVE.VISIBLE = BRIDGE.sort_rows(ACTIVE.VISIBLE, ACTIVE._sort_column, ACTIVE._sort_dir).tolist()
 
 
 def cycle_sort(column):
     """Tri-state per column: ascending -> descending -> unsorted, mirroring the
     WinForms browser's column-header click behaviour."""
-    global _sort_column, _sort_dir
-    if _sort_column != column:
-        _sort_column, _sort_dir = column, 1
+    if ACTIVE._sort_column != column:
+        ACTIVE._sort_column, ACTIVE._sort_dir = column, 1
     else:
-        _sort_dir = (_sort_dir + 1) % 3
+        ACTIVE._sort_dir = (ACTIVE._sort_dir + 1) % 3
     _apply_sort()
 
 
 def sort_state():
-    return _sort_column, _sort_dir
+    return ACTIVE._sort_column, ACTIVE._sort_dir
 
 
 def display_window():
@@ -583,5 +661,5 @@ def display_window():
 
     The cap is the entire point: a search that matches 200k rows still hands
     back 500. The count comes back separately so the UI can say so honestly."""
-    capped = VISIBLE[:DISPLAY_CAP]
-    return len(VISIBLE), [(i, ROWS[i]) for i in capped]
+    capped = ACTIVE.VISIBLE[:DISPLAY_CAP]
+    return len(ACTIVE.VISIBLE), [(i, ACTIVE.ROWS[i]) for i in capped]

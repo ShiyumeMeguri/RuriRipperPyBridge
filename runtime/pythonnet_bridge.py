@@ -419,6 +419,16 @@ class RipperBridge:
         self._bridge.Initialize(_string_array(hook_ids))
         self._hook_ids = tuple(hook_ids)
         self._map = None
+        # Per-game cabmap slots. maps_by_game is game name -> loaded map handle;
+        # _game_hooks_by_game is game name -> the game-hook id(s) active when that
+        # map loaded (its own decoder, kept apart from the AR_* feature hooks a
+        # switch preserves). use_game(game) flips self._map between them and, when
+        # the decoder differs, reinitializes onto it. Several games can be loaded
+        # at once (a CabMapHandle is a pure value object, safe to hold many of);
+        # only one game's decoder is ever active, which is what use_game switches.
+        self.maps_by_game = {}
+        self._game_hooks_by_game = {}
+        self._all_game_hooks = None
         # {clip guid -> (meta_json, payload_bytes)} from the LAST import_cabs
         # call -- the zero-parse curve fast path (see ClipCurveBlob.cs).
         self.clip_curves_by_guid = {}
@@ -458,17 +468,56 @@ class RipperBridge:
         """Scan game_root and write a fresh cabmap to out_path. Returns 0 on success."""
         return int(self._bridge.BuildCabMap(game_root, out_path))
 
-    def load_cab_map(self, cab_map_path):
+    def _game_hook_id_set(self):
+        """Every hook id the DLL classes as being about ONE GAME (ListGameHooks),
+        cached -- the set use_game splits a game's own decoder hooks out of the
+        AR_* feature hooks by."""
+        if self._all_game_hooks is None:
+            self._all_game_hooks = frozenset(str(h) for h in self._bridge.ListGameHooks())
+        return self._all_game_hooks
+
+    def load_cab_map(self, cab_map_path, game=None):
         """Load an existing cabmap file; must be called (or build_cab_map) before
-        enumerate_rows()/import_cabs()."""
-        self._map = self._bridge.LoadCabMap(cab_map_path)
+        enumerate_rows()/import_cabs(). game=None just points the current _map at it
+        (the single-game path, unchanged). Passing a game name ALSO registers the map
+        in this session's per-game slot, capturing whichever game-hook(s) are active
+        now as that game's own decoder, so use_game(game) can switch back to it later
+        without reloading -- load each game's cabmap while that game's hook is the
+        ticked one, exactly as the panel does."""
+        handle = self._bridge.LoadCabMap(cab_map_path)
+        self._map = handle
+        if game is not None:
+            self.maps_by_game[game] = handle
+            game_hooks = self._game_hook_id_set()
+            self._game_hooks_by_game[game] = tuple(h for h in self._hook_ids if h in game_hooks)
+
+    def use_game(self, game):
+        """Select a previously loaded game's cabmap (load_cab_map(path, game=...)) as
+        the active _map and, when that game's decoder differs from what is active,
+        reinitialize onto it: the target game's own game-hook(s) PLUS every non-game
+        hook currently ticked (the AR_* features stay; one game's decoder replaces
+        another's, matching the upstream's mutually-exclusive game hooks). No-op on the
+        hook side when the target's decoder is already active, so repeated selects of
+        the same game are cheap. enumerate_table/search only need the _map switch;
+        import/game_data go through the freshly selected decoder."""
+        if game not in self.maps_by_game:
+            raise RuntimeError(
+                f"No cabmap loaded for game {game!r} -- call load_cab_map(path, game={game!r}) first.")
+        self._map = self.maps_by_game[game]
+        game_hooks = self._game_hook_id_set()
+        target = self._game_hooks_by_game.get(game, ())
+        non_game = [h for h in self._hook_ids if h not in game_hooks]
+        desired = list(target) + [h for h in non_game if h not in target]
+        if set(desired) != set(self._hook_ids):
+            self.reinitialize(desired)
 
     def enumerate_table(self):
         """The row set as a columnar row_table.RowTable -- raw blob/offset
         buffers in ONE interop crossing, nothing materialized per row (the
         load-path optimum; see row_table.py)."""
         if self._map is None:
-            raise RuntimeError("No cabmap loaded -- call load_cab_map()/build_cab_map() first.")
+            raise RuntimeError("No cabmap loaded -- call load_cab_map()/build_cab_map() (or use_game(game) "
+                               "to select a loaded game's map) first.")
         # Imported here, not at module scope: row_table needs numpy, and this
         # module has to stay importable (for claim_runtime_early) before the
         # bootstrap has installed it.
@@ -483,7 +532,8 @@ class RipperBridge:
         ``sort_direction`` is 0 = load order, 1 = ascending, 2 = descending. Returns the
         visible row ids as a numpy int32 array, already sorted."""
         if self._map is None:
-            raise RuntimeError("No cabmap loaded -- call load_cab_map()/build_cab_map() first.")
+            raise RuntimeError("No cabmap loaded -- call load_cab_map()/build_cab_map() (or use_game(game) "
+                               "to select a loaded game's map) first.")
         import numpy as np
         payload = self._bridge.SearchTable(self._map, query or "", _flat_rules(rules),
                                            str(sort_column), int(sort_direction))
@@ -493,7 +543,8 @@ class RipperBridge:
         """Sort an explicit row-id subset (the folder view's listing) by a display column --
         same engine, encoding and direction semantics as search_table."""
         if self._map is None:
-            raise RuntimeError("No cabmap loaded -- call load_cab_map()/build_cab_map() first.")
+            raise RuntimeError("No cabmap loaded -- call load_cab_map()/build_cab_map() (or use_game(game) "
+                               "to select a loaded game's map) first.")
         import numpy as np
         payload = self._bridge.SortRows(self._map, _int_array(row_ids),
                                         str(sort_column), int(sort_direction))
@@ -505,7 +556,8 @@ class RipperBridge:
         match are silently skipped -- compare len(input) to len(result) to
         check coverage. Requires a loaded cabmap."""
         if self._map is None:
-            raise RuntimeError("No cabmap loaded -- call load_cab_map()/build_cab_map() first.")
+            raise RuntimeError("No cabmap loaded -- call load_cab_map()/build_cab_map() (or use_game(game) "
+                               "to select a loaded game's map) first.")
         return [str(c) for c in self._bridge.ResolveCabsForPaths(self._map, _string_array(container_paths))]
 
     def resolve_closure_cab_names(self, cab_names):
@@ -517,7 +569,8 @@ class RipperBridge:
         include an AnimationClip" without resolving/exporting anything.
         Requires a loaded cabmap."""
         if self._map is None:
-            raise RuntimeError("No cabmap loaded -- call load_cab_map()/build_cab_map() first.")
+            raise RuntimeError("No cabmap loaded -- call load_cab_map()/build_cab_map() (or use_game(game) "
+                               "to select a loaded game's map) first.")
         return [str(c) for c in self._bridge.ResolveClosureCabNames(self._map, _string_array(cab_names))]
 
     def find_direct_dependents(self, cab_names):
@@ -533,7 +586,8 @@ class RipperBridge:
         pull in each dependent's own forward closure. Requires a loaded
         cabmap."""
         if self._map is None:
-            raise RuntimeError("No cabmap loaded -- call load_cab_map()/build_cab_map() first.")
+            raise RuntimeError("No cabmap loaded -- call load_cab_map()/build_cab_map() (or use_game(game) "
+                               "to select a loaded game's map) first.")
         return [str(c) for c in self._bridge.FindDirectDependents(self._map, _string_array(cab_names))]
 
     def search_data_table(self, table_or_handle, query, rules=None):
@@ -636,7 +690,8 @@ class RipperBridge:
         character for scope, and re-serializing that character's textures/meshes was most of the
         call's wall time for data the flow never reads."""
         if self._map is None:
-            raise RuntimeError("No cabmap loaded -- call load_cab_map()/build_cab_map() first.")
+            raise RuntimeError("No cabmap loaded -- call load_cab_map()/build_cab_map() (or use_game(game) "
+                               "to select a loaded game's map) first.")
         cab_names = list(cab_names)
         formats = _string_array(_texture_formats)
         if export_class_ids:
