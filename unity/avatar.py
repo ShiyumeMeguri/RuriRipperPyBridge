@@ -132,18 +132,19 @@ def skeleton_world_rests(data):
 
 
 def skeleton_nodes(data):
-    """The avatar's own embedded skeleton (Generic avatars included): one entry per raw node, in
-    m_ParentId's index space -- ``(name, parent_index, (tx,ty,tz), (qw,qx,qy,qz), path)``. Names
-    resolve through TOS path leaves, falling back to ``bone_{i}`` (path None when TOS misses the
-    node); rest TRS from m_SkeletonPose."""
+    """The avatar's full embedded skeleton -- one entry per raw node in m_ParentId's index
+    space: ``(name, parent_index, (tx,ty,tz), (qw,qx,qy,qz), path)``. Sourced from
+    ``m_AvatarSkeleton`` + ``m_AvatarSkeletonPose`` (the whole transform tree, present for
+    humanoid and generic avatars alike -- m_Human.m_Skeleton is only the normalised 24-bone
+    humanoid subset, see skeleton_world_rests). Names resolve through TOS path leaves, falling
+    back to ``bone_{i}`` when TOS misses the node."""
     constant = _unwrap(data["m_Avatar"])
-    human = _unwrap(constant["m_Human"])
-    skeleton = _unwrap(human["m_Skeleton"])
-    nodes = skeleton["m_Node"]
+    skeleton = _unwrap(constant.get("m_AvatarSkeleton") or {})
+    nodes = skeleton.get("m_Node") or []
     skel_ids = [v & 0xFFFFFFFF for v in _int_array(skeleton.get("m_ID") or [])]
     tos = _parse_tos(data)
-    skeleton_pose = _unwrap(human.get("m_SkeletonPose") or {})
-    rest = skeleton_pose.get("m_X") or []
+    pose = _unwrap(constant.get("m_AvatarSkeletonPose") or {})
+    rest = pose.get("m_X") or []
 
     result = []
     for index in range(len(nodes)):
