@@ -18,7 +18,7 @@ Layers, low to high; each may only import from the ones above it in this list:
              registry, guid/asset resolution (disk + in-memory bridge closure),
              mesh/vertex-stream decoding, the transform hierarchy, bind-pose
              skinning, prefab renderer discovery, material property reading,
-             AnimationClip curve payloads, humanoid muscle retargeting.
+             AnimationClip curve payloads and the humanoid-solve wire form.
 ``runtime``  process plumbing: the private dependency bootstrap, the CoreCLR
              claim and the pythonnet wrappers over
              ``Ruri.RipperHook.Bridge.RipperBlenderBridge``, the columnar cabmap

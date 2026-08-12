@@ -241,6 +241,8 @@ class _StaticTypeProxy:
                     return System.Int32(value)
                 if isinstance(value, float):
                     return System.Double(value)
+                if isinstance(value, (bytes, bytearray, memoryview)):
+                    return _clr_byte_array(value)
                 return value
 
             arg_array = System.Array[System.Object]([coerce(a) for a in args]) if args else None
@@ -258,6 +260,46 @@ class _StaticTypeProxy:
                 raise
 
         return call
+
+
+def _clr_byte_array(data):
+    """Python bytes -> System.Byte[] in one memcpy. Element-wise Array[Byte](seq)
+    is a per-byte Python loop -- seconds on a multi-MB curve payload -- so copy
+    through Marshal.Copy from the bytes object's own buffer instead."""
+    import ctypes
+
+    import System
+    import System.Runtime.InteropServices as Interop
+
+    raw = bytes(data)
+    array = System.Array.CreateInstance(System.Byte, len(raw))
+    if raw:
+        address = ctypes.cast(ctypes.c_char_p(raw), ctypes.c_void_p).value
+        Interop.Marshal.Copy(System.IntPtr(address), array, 0, len(raw))
+    return array
+
+
+def solve_humanoid_clip(avatar_document_json, clip_meta_json, clip_float_curves):
+    """The Animator itself, as a call: RipperBlenderBridge.SolveHumanoidClip.
+
+    ``avatar_document_json`` is the armature's ruri_unity_avatar stamp (the
+    Avatar document tree, Unity's own field names); the clip crosses as its
+    float channels in the standard curve-blob wire form
+    (clip_curves.humanoid_float_blob). Returns None for a clip that carries no
+    muscle encoding, else (meta_json, curve_bytes, consumed_attributes,
+    solved_curve_count) with the solved transform curves readable by
+    clip_curves.ClipCurves.from_blob. A muscle clip with no/unsuitable avatar
+    raises -- the caller decides how loud to be.
+
+    Needs only the runtime (no Initialize/hook/cabmap): the solve is pure math
+    over what the caller hands in."""
+    _ensure_runtime()
+    dto = _bridge_type.SolveHumanoidClip(str(avatar_document_json or ""),
+                                         str(clip_meta_json), clip_float_curves)
+    if dto is None:
+        return None
+    return (str(dto.MetaJson), bytes(dto.Curves),
+            [str(a) for a in dto.ConsumedAttributes], int(dto.SolvedCurveCount))
 
 
 def _ensure_runtime():
@@ -316,6 +358,16 @@ def list_available_hooks():
     list from instead of a hardcoded/free-text id."""
     _ensure_runtime()
     return [str(h) for h in _bridge_type.ListAvailableHooks()]
+
+
+def list_game_hooks():
+    """The hook ids that are about ONE GAME rather than a host-wide feature --
+    RipperBlenderBridge.ListGameHooks(). Those are mutually exclusive upstream, so
+    a host's picker asks WHICH ids that covers instead of guessing from the shape
+    of an id (there is a naming convention, but it belongs to the enum that
+    declares it, not to every host that reads a list)."""
+    _ensure_runtime()
+    return [str(h) for h in _bridge_type.ListGameHooks()]
 
 
 def _string_array(strings):
@@ -484,93 +536,6 @@ class RipperBridge:
             raise RuntimeError("No cabmap loaded -- call load_cab_map()/build_cab_map() first.")
         return [str(c) for c in self._bridge.FindDirectDependents(self._map, _string_array(cab_names))]
 
-    def enumerate_vfs_files(self, vfs_roots, block_type_filter=None):
-        """Every file recorded in every .blc manifest across vfs_roots (a
-        path, or a priority-ordered list of paths -- e.g. [Persistent/VFS,
-        StreamingAssets/VFS], see the C# doc comments on EnumerateVfsFiles/
-        BuildMergedFileIndex for why a hot-update overlay root and the base
-        client root normally both need to be passed together), of ANY block
-        type (not just Unity-CAB-shaped entries). Returns plain dicts
-        (file_name/file_name_hash/block_type/length/chk_path). Independent of
-        load_cab_map() -- only needs Initialize() (an active session) to have
-        run."""
-        filter_arg = _string_array(block_type_filter) if block_type_filter else None
-        return [
-            {
-                "file_name": f.FileName,
-                "file_name_hash": int(f.FileNameHash),
-                "block_type": f.BlockType,
-                "length": int(f.Length),
-                "chk_path": f.ChkPath,
-            }
-            for f in self._bridge.EnumerateVfsFiles(_string_array(_as_root_list(vfs_roots)), filter_arg)
-        ]
-
-    def extract_vfs_file(self, vfs_roots, file_name):
-        """Raw decrypted bytes of one VFS-packed file, by its exact original
-        name (as returned by enumerate_vfs_files' file_name). Tries vfs_roots
-        in priority order with fallback -- a hot-update overlay can list a
-        file it never duplicated because that patch didn't change it (see
-        ExtractFirstAvailable's C# doc comment)."""
-        return bytes(self._bridge.ExtractVfsFile(_string_array(_as_root_list(vfs_roots)), file_name))
-
-    def read_character_models(self, cab_names):
-        """Each character's authoritative model prefab name and expression-table
-        tag, from the character data assets in cab_names. Returns
-        {character_id: {"model", "tag", "asset"}}. A character's model is NOT
-        derivable from its id -- no config table carries one -- so this asset is
-        the only source. Read and field-extracted on the C# side."""
-        if self._map is None:
-            raise RuntimeError("No cabmap loaded -- call load_cab_map()/build_cab_map() first.")
-        flat = [str(v) for v in self._bridge.ReadCharacterModels(self._map, _string_array(cab_names))]
-        return {flat[i]: {"model": flat[i + 1], "tag": flat[i + 2], "asset": flat[i + 3]}
-                for i in range(0, len(flat), 4)}
-
-    def npc_prefab_manifest(self, vfs_roots):
-        """Every npc template the game ships an assembled model for."""
-        return [str(v) for v in self._bridge.NpcPrefabManifest(
-            _string_array(_as_root_list(vfs_roots)))]
-
-    def npc_materials(self, cab_names, vfs_roots, template_id):
-        """Which material every submesh of one assembled npc wears --
-        {mesh_name: [container path, ...]} in slot order, plus the part each
-        mesh belongs to. ``cab_names`` is where that npc family's shared
-        assembly table lives; its closure is loaded and decoded on the C# side
-        (the codes and path hashes are binary), so nothing is parsed here.
-
-        An npc's colours come from its TEMPLATE, not from its parts: the same
-        part takes different materials under different templates, so no naming
-        convention can derive them. Requires a loaded cabmap."""
-        if self._map is None:
-            raise RuntimeError("No cabmap loaded -- call load_cab_map()/build_cab_map() first.")
-        rows = self._bridge.ReadNpcMaterials(self._map, _string_array(cab_names),
-                                             _string_array(_as_root_list(vfs_roots)), template_id)
-        return [
-            {
-                "part": str(row.PartName),
-                "mesh": str(row.MeshName),
-                "materials": [str(path) for path in row.Materials],
-            }
-            for row in rows
-        ]
-
-    def npc_prefab_parts(self, vfs_roots, template_id):
-        """What one npc template is assembled from, as
-        {character_id, lod_count, facial_morph, parts}. A generic npc ships no
-        model prefab of its own -- the game builds it out of body/face/hair/ear/
-        tail part prefabs, and only its own per-template manifest lists them.
-        The json is read and parsed on the C# side; nothing is parsed here."""
-        flat = [str(v) for v in self._bridge.NpcPrefabParts(
-            _string_array(_as_root_list(vfs_roots)), template_id)]
-        return {
-            "character_id": flat[0],
-            "lod_count": int(flat[1] or 0),
-            "facial_morph": flat[2],
-            "avatar_templet": flat[3],
-            "avatar_mesh": flat[4],
-            "parts": flat[5:],
-        }
-
     def search_data_table(self, table_or_handle, query, rules=None):
         """Row ids of a table matching ``query`` AND every enabled Include/
         Exclude rule -- run by the SAME vectorized C# engine and the SAME rule
@@ -606,135 +571,39 @@ class RipperBridge:
         return str(self._bridge.OpenHostTable(str(handle), _string_array(list(columns)),
                                               _string_array(flat)))
 
-    def query_data_table(self, vfs_roots, container_file, column_specs,
-                         distinct_by="", prefer_non_empty="", cancellation=None):
-        """Project one of the game's own self-describing data containers into a
-        column_table.ColumnTable. ``container_file`` is a VFS file name; each
-        entry of ``column_specs`` is (name, path) or (name, path, through_file,
-        through_path), where ``through_file`` resolves the value at ``path`` as
-        a key into that container's own keyed rows -- which is how a roster
-        picks up its localized names. Column 0 of the result is the row key.
+    def list_game_data(self):
+        """What the ACTIVE game publishes: ``[{id, parameters, kind, description}]``.
 
-        The container declares its own schema, so no binding is generated,
-        checked in, or able to drift; nothing is parsed on this side.
+        A host lists this instead of hardcoding dataset ids, so a panel can be told
+        what it may ask for rather than shipping a copy of the answer that goes
+        stale. Empty when no game hook is enabled."""
+        flat = [str(item) for item in self._bridge.ListGameData()]
+        return [{"id": flat[index], "parameters": [p for p in flat[index + 1].split(",") if p],
+                 "kind": flat[index + 2], "description": flat[index + 3]}
+                for index in range(0, len(flat), 4)]
 
-        ``cancellation`` takes a System.Threading.CancellationToken to abort a
-        long read; the whole read/index/project chain honours it."""
+    def game_data(self, dataset_id, *args, cancellation=None):
+        """One dataset the active game publishes, as a column_table.ColumnTable.
+
+        This is the ONE way game data crosses: whatever a game reads -- a parts
+        catalog, a scene list, a build plan, a face's pattern table -- arrives in
+        the same columnar shape, already searchable under ``table.handle`` (pass it
+        to search_data_table) and cached on the C# side by (id, args). Nothing is
+        parsed here."""
         import System.Threading
         from . import column_table
-        flat = []
-        for spec in column_specs:
-            name, path = spec[0], spec[1]
-            through = spec[2] if len(spec) > 2 else ""
-            through_path = spec[3] if len(spec) > 3 else ""
-            # A join chain may be given as a list of hops; the wire form is ';'-separated.
-            if not isinstance(through, str):
-                through = ";".join(through)
-            if not isinstance(through_path, str):
-                through_path = ";".join(through_path)
-            flat.extend((name, path, through, through_path))
-        # CancellationToken.None cannot be written as an attribute here: None is a
-        # python keyword, so the member has to be fetched by name.
         token = cancellation if cancellation is not None \
             else getattr(System.Threading.CancellationToken, "None")
-        return column_table.ColumnTable.from_packed(self._bridge.QueryDataTable(
-            _string_array(_as_root_list(vfs_roots)), container_file, _string_array(flat),
-            distinct_by, prefer_non_empty, token))
+        return column_table.ColumnTable.from_packed(self._bridge.GameDataTable(
+            self._map, str(dataset_id), _string_array([str(arg) for arg in args]), token))
 
-    def enumerate_scene_maps(self, vfs_roots):
-        """Every distinct map name with streaming-chunk data across vfs_roots."""
-        return [str(m) for m in self._bridge.EnumerateSceneMaps(_string_array(_as_root_list(vfs_roots)))]
-
-    def scene_chunk_summary(self, vfs_roots, map_name):
-        """One map's chunk inventory, summarized to the numbers a caller
-        decides by: its scene states, and the split between cell-anchored
-        chunk files and the map-wide/dynamic ones a window can only bound.
-        Read out of the VFS manifests alone -- not one chunk byte is touched.
-        A summary rather than the file list on purpose: a real map's list is
-        15k rows of interop for what amounts to two labels."""
-        summary = self._bridge.SceneChunkSummary(_string_array(_as_root_list(vfs_roots)), map_name)
-        return {
-            "scene_state_ids": [int(s) for s in summary.SceneStateIds],
-            "anchored_files": int(summary.AnchoredFiles),
-            "anchored_bytes": int(summary.AnchoredBytes),
-            "floating_files": int(summary.FloatingFiles),
-            "floating_bytes": int(summary.FloatingBytes),
-        }
-
-    def diagnose_schema_drift(self, vfs_roots, map_name):
-        """Binary/vtable-level schema-drift report (list of str lines) for
-        map_name's streaming chunks -- flags any FlatBuffers table type
-        where the live game data declares more fields than the currently-
-        compiled (1.2.4-era) bindings know how to read. See
-        EndfieldSceneBridge.DiagnoseSchemaDrift's C# doc comment."""
-        return [str(line) for line in
-                self._bridge.DiagnoseSchemaDrift(_string_array(_as_root_list(vfs_roots)), map_name)]
-
-    def scene_landmarks(self, vfs_roots):
-        """Every named place the game's own map UI lists -- plain dicts
-        (level_id/is_single_level/min_x/min_z/max_x/max_z). The rect is the one
-        the game gives that place, and it is exactly what
-        discover_scene_placements takes as a window, so asking for a place by
-        name never involves guessing a coordinate. is_single_level separates a
-        scene that is its own level (a dungeon, a station interior) from a place
-        inside a bigger streaming map."""
-        return [
-            {
-                "level_id": l.LevelId,
-                "is_single_level": bool(l.IsSingleLevel),
-                "min_x": float(l.MinX), "min_z": float(l.MinZ),
-                "max_x": float(l.MaxX), "max_z": float(l.MaxZ),
-            }
-            for l in self._bridge.SceneLandmarks(_string_array(_as_root_list(vfs_roots)))
-        ]
-
-    def discover_scene_placements(self, vfs_roots, map_name, min_x, min_z, max_x, max_z,
-                                  scene_state_ids=(), lod0_only=True):
-        """What ONE STREAMING WINDOW of map_name places -- the world rect
-        (min_x, min_z)..(max_x, max_z) that the running game itself streams,
-        restricted to `scene_state_ids` (empty = every state the map ships).
-        Pass an infinite rect for the whole map, which on a real open-world map
-        is a dependency closure no machine holds at once -- window it by a place
-        the game itself names instead (see scene_landmarks).
-
-        Reduced on the C# side (EndfieldSceneBridge.Reduce), where the raw rows
-        already live: `placements` holds ONLY the importable rows (geometry
-        with a verified transform; one detail level per instance when
-        lod0_only), `seed_paths` is the distinct mesh+material container path
-        set an import needs (feed straight to resolve_cabs_for_paths), and the
-        counts say what was dropped and why. A real window is 10^5 raw rows --
-        filtering after the interop crossing paid for the crossing twice and
-        re-paid the filter on every UI redraw.
-
-        material_asset_paths is the SAME hash-LUT source as asset_path
-        (FBPropertyAssetData, AssetType==1 instead of ==2) -- the entity's own
-        real material(s), not a naming-convention guess. Cheap: no dependency
-        closure resolved, no CAB loaded -- see DiscoverScenePlacements' C# doc
-        comment, which also covers how the non-grid chunks get bounded."""
-        result = self._bridge.DiscoverScenePlacements(
-            _string_array(_as_root_list(vfs_roots)), map_name,
-            float(min_x), float(min_z), float(max_x), float(max_z),
-            _int_array(scene_state_ids), bool(lod0_only))
-        return {
-            "total": int(result.Total),
-            "no_transform": int(result.NoTransform),
-            "lod_filtered": int(result.LodFiltered),
-            "distinct_assets": int(result.DistinctAssets),
-            "seed_paths": [str(path) for path in result.SeedPaths],
-            "placements": [
-                {
-                    "asset_path": p.AssetPath,
-                    "asset_hash": int(p.AssetHash),
-                    "entity_name": p.EntityName,
-                    "source_chunk": p.SourceChunk,
-                    "px": float(p.Px), "py": float(p.Py), "pz": float(p.Pz),
-                    "qx": float(p.Qx), "qy": float(p.Qy), "qz": float(p.Qz), "qw": float(p.Qw),
-                    "sx": float(p.Sx), "sy": float(p.Sy), "sz": float(p.Sz),
-                    "material_asset_paths": [str(m) for m in p.MaterialAssetPaths],
-                }
-                for p in result.Placements
-            ],
-        }
+    def game_data_blob(self, dataset_id, *args, cancellation=None):
+        """One published dataset whose payload is bytes rather than rows."""
+        import System.Threading
+        token = cancellation if cancellation is not None \
+            else getattr(System.Threading.CancellationToken, "None")
+        return bytes(self._bridge.GameDataBlob(
+            self._map, str(dataset_id), _string_array([str(arg) for arg in args]), token))
 
     def import_cabs(self, cab_names, export_class_ids=None):
         """Resolve cab_names' dependency closure, load it, export it in-memory, and return
@@ -820,20 +689,3 @@ class RipperBridge:
                                     for kvp in result.AssetPaths}
         return assets, roots, seed_roots, clips_by_cab, scene_roots
 
-    def find_associated_avatar_cabs(self, clip_cab_name):
-        """Every Avatar-bearing CAB in a clip-hosting CAB's dependency neighborhood, nearest
-        first, via the cabmap's own dependency graph: reverse BFS to the clip's dependents (the
-        AnimatorController, then the character prefabs), then each dependent's forward closure
-        -- see RipperBlenderBridge.FindAssociatedAvatarCabs. Returns a (possibly empty) list.
-        Co-seed ALL of them into import_cabs alongside the clip CAB: (a) AssetRipper itself then
-        restores the clips' hashed curve paths to real "Root/Bip001/..." strings (verified
-        against the real game: a clip CAB alone has no dependencies and its curve paths export
-        as "path_0x<CRC32>_<suffix>" placeholders), and (b) the importer's Avatar search
-        picks the first Avatar that actually builds a working muscle retargeter -- the
-        neighborhood routinely contains stub Avatars (7KB, empty m_TOS, zeroed skeleton ids)
-        alongside the real one (verified: pelica's battle rig surfaces the stub BEFORE the real
-        334KB avatar), and which is which is only knowable from the exported content."""
-        if self._map is None:
-            raise RuntimeError("No cabmap loaded -- call load_cab_map()/build_cab_map() first.")
-        cabs = self._bridge.FindAssociatedAvatarCabs(self._map, clip_cab_name, 4)
-        return [str(c) for c in cabs]

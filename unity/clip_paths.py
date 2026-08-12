@@ -28,15 +28,6 @@ from __future__ import annotations
 import re
 import zlib
 
-# Humanoid body motion ships as muscle/root FLOAT curves. Detecting that only needs the root
-# channels' own prefixes -- every humanoid clip carries RootT/RootQ -- not the full muscle
-# taxonomy, which lives on the C# side with the solver that consumes it.
-_ROOT_CHANNEL_PREFIXES = ("RootT.", "RootQ.", "MotionT.", "MotionQ.")
-
-
-def _is_root_channel(attribute):
-    return attribute.startswith(_ROOT_CHANNEL_PREFIXES)
-
 # AssetRipper's placeholder for a binding it could not restore to a string.
 _HASHED_PATH_RE = re.compile(r"^path_0x([0-9A-Fa-f]{1,8})_")
 
@@ -115,20 +106,3 @@ def clip_path_match_ratio(clip, path_to_bone):
             if path in path_to_bone or entry_crc(path) in table:
                 matched += 1
     return (matched / total if total else 0.0), total
-
-
-def clip_is_humanoid(clip):
-    """Whether a clip's body motion is MUSCLE-encoded, and so unreadable here --
-    what a caller warns on (a humanoid clip imported with no Avatar in scope
-    silently drops the entire body's motion, and there is no muscle solver here).
-
-    Root channels alone do not say so. A generic clip -- an ACL-compressed one
-    especially -- ships complete per-bone transform tracks AND Unity's own
-    RootT/RootQ/MotionT/MotionQ root-motion channels, so keying on those alone
-    calls every one of them humanoid. What actually distinguishes a muscle clip
-    is that the body's motion is in the floats INSTEAD of transform curves: a
-    clip that binds transform curves already carries its body motion, whatever
-    root-motion metadata rides along with it."""
-    if any(len(channels) for channels in clip.transform_channel_lists()):
-        return False
-    return any(_is_root_channel(ch.attribute) for ch in clip.floats)

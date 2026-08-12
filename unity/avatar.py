@@ -2,10 +2,12 @@
 Avatar asset.
 
 This is DATA extraction, deliberately not solving: Unity's muscle solve lives on the C# side
-(Ruri.RipperHook's HumanoidToGeneric pass), which rewrites every humanoid clip into ordinary
-per-bone transform curves before anything reaches Python. The only thing a host still reads off
-an Avatar is its own raw skeleton -- node hierarchy, rest pose, and TOS-resolved names -- which
-is populated for Generic avatars too.
+(Ruri.RipperHook's HumanoidClipGenericizer), asked for one clip at a time through
+RipperBlenderBridge.SolveHumanoidClip, which answers with ordinary per-bone transform curves
+and leaves the clip asset untouched. Nothing rewrites clips globally -- that is what keeps a
+Unity-bound export's humanoid clips humanoid. The only thing a host still reads off an Avatar
+is its own raw skeleton -- node hierarchy, rest pose, and TOS-resolved names -- which is
+populated for Generic avatars too.
 """
 
 from __future__ import annotations
@@ -131,8 +133,9 @@ def skeleton_world_rests(data):
 
 def skeleton_nodes(data):
     """The avatar's own embedded skeleton (Generic avatars included): one entry per raw node, in
-    m_ParentId's index space -- ``(name, parent_index, (tx,ty,tz), (qw,qx,qy,qz))``. Names resolve
-    through TOS path leaves, falling back to ``bone_{i}``; rest TRS from m_SkeletonPose."""
+    m_ParentId's index space -- ``(name, parent_index, (tx,ty,tz), (qw,qx,qy,qz), path)``. Names
+    resolve through TOS path leaves, falling back to ``bone_{i}`` (path None when TOS misses the
+    node); rest TRS from m_SkeletonPose."""
     constant = _unwrap(data["m_Avatar"])
     human = _unwrap(constant["m_Human"])
     skeleton = _unwrap(human["m_Skeleton"])
@@ -145,13 +148,8 @@ def skeleton_nodes(data):
     result = []
     for index in range(len(nodes)):
         parent = int(nodes[index].get("m_ParentId", -1))
-        name = None
-        if index < len(skel_ids):
-            path = tos.get(skel_ids[index])
-            if path:
-                name = path.rsplit("/", 1)[-1]
-        if not name:
-            name = f"bone_{index}"
+        path = tos.get(skel_ids[index]) if index < len(skel_ids) else None
+        name = path.rsplit("/", 1)[-1] if path else f"bone_{index}"
         if index < len(rest):
             x = rest[index]
             t = (float(x["t"]["x"]), float(x["t"]["y"]), float(x["t"]["z"]))
@@ -159,5 +157,5 @@ def skeleton_nodes(data):
         else:
             t = (0.0, 0.0, 0.0)
             q = (1.0, 0.0, 0.0, 0.0)
-        result.append((name, parent, t, q))
+        result.append((name, parent, t, q, path))
     return result
