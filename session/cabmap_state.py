@@ -128,6 +128,21 @@ def activate(game):
     return ACTIVE
 
 
+def drop(game):
+    """Discard ``game``'s browser session entirely -- its rows, folder tree,
+    selection and animation handover -- when its tab is closed. Only this one
+    game's in-memory view is released; the process-wide BRIDGE and every other
+    game's session are untouched (HOLDS_PROCESS_STATE). If it was the live one,
+    the nameless session becomes active so every module-level view still
+    resolves."""
+    global ACTIVE
+    session = SESSIONS.pop(game, None)
+    if session is None:
+        return
+    if ACTIVE is session:
+        ACTIVE = session_for(None)
+
+
 def active_game():
     """The game name the live session is for, or None for the nameless session."""
     return ACTIVE.game if ACTIVE is not None else None
