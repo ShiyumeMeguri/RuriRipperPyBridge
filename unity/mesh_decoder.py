@@ -360,8 +360,35 @@ def decode_mesh(doc):
 
     mesh.bone_name_hashes = _decode_uint_hex(data.get("m_BoneNameHashes"))
 
+    _apply_legacy_skin(mesh, data.get("m_Skin"))
+
     mesh.blendshapes = _decode_blendshapes(data.get("m_Shapes") or {})
     return mesh
+
+
+def _apply_legacy_skin(mesh, skin):
+    """Skin weights from the mesh's own ``m_Skin`` array.
+
+    Before Unity 2018 there were no BlendWeight/BlendIndices vertex channels at
+    all: a skinned mesh carries a parallel ``BoneWeights4`` array instead, one
+    entry per vertex. Nothing in the vertex stream says so, and a mesh decoded
+    without this simply comes out with no vertex groups -- which is what every
+    Unity 5 character did before this existed.
+
+    Only ever consulted when the stream itself carried none, so a modern mesh is
+    untouched."""
+    if mesh.bone_indices is not None or not skin:
+        return
+    weights = np.zeros((len(skin), 4), dtype=np.float32)
+    indices = np.zeros((len(skin), 4), dtype=np.int32)
+    for vertex, entry in enumerate(skin):
+        if not isinstance(entry, dict):
+            continue
+        for slot in range(4):
+            weights[vertex, slot] = float(entry.get("weight[{0}]".format(slot), 0.0) or 0.0)
+            indices[vertex, slot] = int(entry.get("boneIndex[{0}]".format(slot), 0) or 0)
+    mesh.bone_weights = weights
+    mesh.bone_indices = indices
 
 
 def decode_mesh_blob(meta_json, payload):
@@ -408,6 +435,15 @@ def decode_mesh_blob(meta_json, payload):
 
     hash_bytes = section("boneNameHashes")
     mesh.bone_name_hashes = np.frombuffer(hash_bytes, dtype="<u4").copy() if len(hash_bytes) else None
+
+    # The pre-2018 skin array, when the stream carried no blend channels (see
+    # _apply_legacy_skin). Four float weights then four int32 bone indices per
+    # vertex, which is one strided view each rather than a per-vertex loop.
+    skin_bytes = section("skin")
+    if mesh.bone_indices is None and len(skin_bytes):
+        skin = np.frombuffer(skin_bytes, dtype="<u4").reshape(-1, 8)
+        mesh.bone_weights = skin[:, :4].copy().view(np.float32)
+        mesh.bone_indices = skin[:, 4:].copy().view(np.int32)
 
     mesh.blendshapes = _decode_blendshapes_blob(meta, section("shapeVertices"))
     return mesh
