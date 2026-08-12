@@ -204,6 +204,82 @@ def iter_renderers(prefab, go_to_node, options=None, stats=None):
             submesh_range=static_batch_range(mr), disabled=disabled)
 
 
+class CameraInfo:
+    """One camera a prefab defines, wherever it sits in the hierarchy."""
+
+    __slots__ = ("go_id", "node", "name", "fov", "near", "far", "orthographic",
+                 "orthographic_size", "disabled")
+
+    def __init__(self, go_id, node, name, fov, near, far, orthographic,
+                 orthographic_size, disabled):
+        self.go_id = go_id
+        self.node = node
+        self.name = name
+        self.fov = fov
+        self.near = near
+        self.far = far
+        self.orthographic = orthographic
+        self.orthographic_size = orthographic_size
+        self.disabled = disabled
+
+    def __repr__(self):
+        return "<CameraInfo {0} fov={1}>".format(self.name, self.fov)
+
+
+# A virtual camera is a MonoBehaviour, so it cannot be found by class id -- but
+# every one of them carries its lens under this key, with these field names.
+# Not a game fact: this is Cinemachine, the same package in any Unity project.
+_LENS_KEY = "m_Lens"
+
+
+def iter_cameras(prefab, go_to_node, options=None):
+    """Yield a CameraInfo per camera in a prefab -- real Unity cameras and
+    Cinemachine virtual cameras alike.
+
+    A virtual camera IS a camera as far as an importing host is concerned: it
+    carries a position, a rotation and a lens, and a scene that defines its
+    viewpoints that way has no class-20 Camera to find. Reading only the engine
+    type would import such a prefab with no camera at all."""
+    filters = resolve_filters(options)
+    for doc in prefab.documents:
+        data = doc.data
+        if doc.class_name == "Camera":
+            lens = {"fov": data.get("field of view"),
+                    "near": data.get("near clip plane"),
+                    "far": data.get("far clip plane"),
+                    "ortho": data.get("orthographic"),
+                    "ortho_size": data.get("orthographic size")}
+        elif doc.class_name == "MonoBehaviour" and isinstance(data.get(_LENS_KEY), dict):
+            block = data[_LENS_KEY]
+            lens = {"fov": block.get("FieldOfView"),
+                    "near": block.get("NearClipPlane"),
+                    "far": block.get("FarClipPlane"),
+                    "ortho": block.get("Orthographic"),
+                    "ortho_size": block.get("OrthographicSize")}
+        else:
+            continue
+
+        go_id = (data.get("m_GameObject") or {}).get("fileID")
+        node = go_to_node.get(go_id)
+        if node is None:
+            continue                       # no Transform: nowhere to place it
+        disabled = data.get("m_Enabled") == 0 or not node.active
+        if disabled and not filters["import_inactive"]:
+            continue
+        yield CameraInfo(
+            go_id=go_id, node=node, name=go_name(prefab, go_id),
+            fov=_as_float(lens["fov"], 60.0), near=_as_float(lens["near"], 0.3),
+            far=_as_float(lens["far"], 1000.0), orthographic=bool(lens["ortho"]),
+            orthographic_size=_as_float(lens["ortho_size"], 5.0), disabled=disabled)
+
+
+def _as_float(value, fallback):
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return fallback
+
+
 # ---------------------------------------------------------------------------
 # Mesh resolution
 # ---------------------------------------------------------------------------
