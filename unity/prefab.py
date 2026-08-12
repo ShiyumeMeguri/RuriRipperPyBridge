@@ -205,41 +205,33 @@ def iter_renderers(prefab, go_to_node, options=None, stats=None):
 
 
 class CameraInfo:
-    """One camera a prefab defines, wherever it sits in the hierarchy."""
-
-    __slots__ = ("go_id", "node", "name", "fov", "near", "far", "orthographic",
+    __slots__ = ("node", "name", "fov", "near", "far", "orthographic",
                  "orthographic_size", "disabled")
 
-    def __init__(self, go_id, node, name, fov, near, far, orthographic,
-                 orthographic_size, disabled):
-        self.go_id = go_id
-        self.node = node
-        self.name = name
-        self.fov = fov
-        self.near = near
-        self.far = far
-        self.orthographic = orthographic
-        self.orthographic_size = orthographic_size
-        self.disabled = disabled
-
-    def __repr__(self):
-        return "<CameraInfo {0} fov={1}>".format(self.name, self.fov)
+    def __init__(self, **kw):
+        for key, value in kw.items():
+            setattr(self, key, value)
 
 
-# A virtual camera is a MonoBehaviour, so it cannot be found by class id -- but
-# every one of them carries its lens under this key, with these field names.
-# Not a game fact: this is Cinemachine, the same package in any Unity project.
-_LENS_KEY = "m_Lens"
+class LightInfo:
+    __slots__ = ("node", "name", "type", "color", "intensity", "range",
+                 "spot_angle", "inner_spot_angle", "area_size", "disabled")
+
+    def __init__(self, **kw):
+        for key, value in kw.items():
+            setattr(self, key, value)
+
+
+def _content_node(doc, go_to_node, filters):
+    go_id = (doc.data.get("m_GameObject") or {}).get("fileID")
+    node = go_to_node.get(go_id)
+    if node is None:
+        return None, False, False
+    disabled = doc.data.get("m_Enabled") == 0 or not node.active
+    return node, disabled, disabled and not filters["import_inactive"]
 
 
 def iter_cameras(prefab, go_to_node, options=None):
-    """Yield a CameraInfo per camera in a prefab -- real Unity cameras and
-    Cinemachine virtual cameras alike.
-
-    A virtual camera IS a camera as far as an importing host is concerned: it
-    carries a position, a rotation and a lens, and a scene that defines its
-    viewpoints that way has no class-20 Camera to find. Reading only the engine
-    type would import such a prefab with no camera at all."""
     filters = resolve_filters(options)
     for doc in prefab.documents:
         data = doc.data
@@ -249,8 +241,8 @@ def iter_cameras(prefab, go_to_node, options=None):
                     "far": data.get("far clip plane"),
                     "ortho": data.get("orthographic"),
                     "ortho_size": data.get("orthographic size")}
-        elif doc.class_name == "MonoBehaviour" and isinstance(data.get(_LENS_KEY), dict):
-            block = data[_LENS_KEY]
+        elif doc.class_name == "MonoBehaviour" and isinstance(data.get("m_Lens"), dict):
+            block = data["m_Lens"]
             lens = {"fov": block.get("FieldOfView"),
                     "near": block.get("NearClipPlane"),
                     "far": block.get("FarClipPlane"),
@@ -258,19 +250,36 @@ def iter_cameras(prefab, go_to_node, options=None):
                     "ortho_size": block.get("OrthographicSize")}
         else:
             continue
-
-        go_id = (data.get("m_GameObject") or {}).get("fileID")
-        node = go_to_node.get(go_id)
-        if node is None:
-            continue                       # no Transform: nowhere to place it
-        disabled = data.get("m_Enabled") == 0 or not node.active
-        if disabled and not filters["import_inactive"]:
+        node, disabled, skip = _content_node(doc, go_to_node, filters)
+        if node is None or skip:
             continue
         yield CameraInfo(
-            go_id=go_id, node=node, name=go_name(prefab, go_id),
+            node=node, name=go_name(prefab, node.go_id),
             fov=_as_float(lens["fov"], 60.0), near=_as_float(lens["near"], 0.3),
             far=_as_float(lens["far"], 1000.0), orthographic=bool(lens["ortho"]),
             orthographic_size=_as_float(lens["ortho_size"], 5.0), disabled=disabled)
+
+
+def iter_lights(prefab, go_to_node, options=None):
+    filters = resolve_filters(options)
+    for doc in prefab.all("Light"):
+        data = doc.data
+        node, disabled, skip = _content_node(doc, go_to_node, filters)
+        if node is None or skip:
+            continue
+        color = data.get("m_Color") or {}
+        area = data.get("m_AreaSize") or {}
+        yield LightInfo(
+            node=node, name=go_name(prefab, node.go_id),
+            type=int(data.get("m_Type") or 0),
+            color=(_as_float(color.get("r"), 1.0), _as_float(color.get("g"), 1.0),
+                   _as_float(color.get("b"), 1.0)),
+            intensity=_as_float(data.get("m_Intensity"), 1.0),
+            range=_as_float(data.get("m_Range"), 10.0),
+            spot_angle=_as_float(data.get("m_SpotAngle"), 30.0),
+            inner_spot_angle=_as_float(data.get("m_InnerSpotAngle"), 0.0),
+            area_size=(_as_float(area.get("x"), 1.0), _as_float(area.get("y"), 1.0)),
+            disabled=disabled)
 
 
 def _as_float(value, fallback):
