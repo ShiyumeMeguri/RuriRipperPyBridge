@@ -109,10 +109,10 @@ class MaterialProperties:
     ``floats`` merges m_Ints under m_Floats, ``colors`` is [r, g, b, a]."""
 
     __slots__ = ("name", "document", "shader_ref", "tex_envs", "textures",
-                 "texture_st", "floats", "colors", "keywords")
+                 "texture_st", "floats", "colors", "keywords", "disabled_passes")
 
     def __init__(self, name, document, shader_ref, tex_envs, textures,
-                 texture_st, floats, colors, active_keywords):
+                 texture_st, floats, colors, active_keywords, disabled_passes=()):
         self.name = name
         self.document = document
         self.shader_ref = shader_ref
@@ -122,6 +122,11 @@ class MaterialProperties:
         self.floats = floats
         self.colors = colors
         self.keywords = active_keywords
+        # Passes the material itself switches off (Unity `disabledShaderPasses`,
+        # pass-name strings). The only per-material truth for "this one draws no
+        # outline" -- a float like _OutlineWidth is a historical key and proves
+        # nothing (m_SavedProperties accumulates every key ever set).
+        self.disabled_passes = list(disabled_passes)
 
     def __repr__(self):
         return "<MaterialProperties {0}>".format(self.name)
@@ -198,11 +203,14 @@ def parse_material(document):
         elif isinstance(value, (list, tuple)) and len(value) >= 4:
             colors[name] = [float(v) for v in value[:4]]
 
+    disabled_passes = [str(p) for p in (data.get("disabledShaderPasses") or [])
+                       if isinstance(p, str) and p]
+
     return MaterialProperties(
         name=str(data.get("m_Name", "")), document=document,
         shader_ref=data.get("m_Shader"), tex_envs=tex_envs, textures=textures,
         texture_st=texture_st, floats=floats, colors=colors,
-        active_keywords=keywords(document))
+        active_keywords=keywords(document), disabled_passes=disabled_passes)
 
 
 def material_name(document, guid, fallback="Material"):
