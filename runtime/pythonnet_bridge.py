@@ -279,6 +279,19 @@ def _clr_byte_array(data):
     return array
 
 
+def describe_humanoid_bones(avatar_document_json):
+    """{bone name: human slot name} for an avatar's human rig, empty for a generic one.
+
+    The slot vocabulary is Unity's own humanoid enum and the index chain that
+    resolves a slot to a real bone lives C#-side (RipperBlenderBridge.
+    DescribeHumanoidBones); restating either here would be a second declaration
+    of the same thing. Needs only the runtime -- no hook, no cabmap."""
+    _ensure_runtime()
+    flat = _bridge_type.DescribeHumanoidBones(str(avatar_document_json or ""))
+    pairs = [str(value) for value in flat]
+    return {pairs[i]: pairs[i + 1] for i in range(0, len(pairs) - 1, 2)}
+
+
 def solve_humanoid_clip(avatar_document_json, clip_meta_json, clip_float_curves):
     """The Animator itself, as a call: RipperBlenderBridge.SolveHumanoidClip.
 
