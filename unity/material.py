@@ -27,6 +27,27 @@ family still gets *something* instead of losing its textures outright.
 
 from __future__ import annotations
 
+
+def shader_identity(shader_text):
+    """The name a Shader asset calls itself, off its own ``Shader "..."`` head
+    line. That string -- not a guid, not a file name -- is what a shader stack
+    claims a material by, so it is also what a report has to say when nothing
+    claims one."""
+    if not shader_text:
+        return None
+    head = shader_text.lstrip()
+    if not head.startswith("Shader"):
+        return None
+    first = head.split("\n", 1)[0]
+    open_quote = first.find('"')
+    if open_quote < 0:
+        return None
+    close_quote = first.find('"', open_quote + 1)
+    if close_quote < 0:
+        return None
+    return first[open_quote + 1:close_quote]
+
+
 # Candidate property names per logical slot, in priority order.
 BASE_COLOR_NAMES = [
     "_MainTex", "_BaseMap", "_BaseColorMap", "_BaseColorTex", "_Albedo",
@@ -130,6 +151,11 @@ class MaterialProperties:
 
     def __repr__(self):
         return "<MaterialProperties {0}>".format(self.name)
+
+    def shader_guid(self):
+        ref = self.shader_ref if isinstance(self.shader_ref, dict) else None
+        guid = (ref or {}).get("guid")
+        return str(guid).lower() if guid else None
 
     # -- lookups ------------------------------------------------------------
 
