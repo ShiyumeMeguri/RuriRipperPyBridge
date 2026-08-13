@@ -115,6 +115,14 @@ def go_name(prefab, go_id):
     return str(go.data.get("m_Name", "Object")) if go else "Object"
 
 
+def go_tag(prefab, go_id):
+    """The owning GameObject's ``m_TagString`` -- Unity's own per-object label.
+    ``MainCamera`` marks the camera a scene is actually looked through, and it
+    is the file's only statement about which of several cameras that is."""
+    go = prefab.get(go_id)
+    return str(go.data.get("m_TagString", "")) if go else ""
+
+
 def mesh_filter_ref(prefab, node):
     """The ``m_Mesh`` reference of the MeshFilter sitting on a node's own
     GameObject -- where a MeshRenderer's geometry actually lives."""
@@ -205,7 +213,7 @@ def iter_renderers(prefab, go_to_node, options=None, stats=None):
 
 
 class CameraInfo:
-    __slots__ = ("node", "name", "fov", "near", "far", "orthographic",
+    __slots__ = ("node", "name", "tag", "fov", "near", "far", "orthographic",
                  "orthographic_size", "disabled")
 
     def __init__(self, **kw):
@@ -254,7 +262,7 @@ def iter_cameras(prefab, go_to_node, options=None):
         if node is None or skip:
             continue
         yield CameraInfo(
-            node=node, name=go_name(prefab, node.go_id),
+            node=node, name=go_name(prefab, node.go_id), tag=go_tag(prefab, node.go_id),
             fov=_as_float(lens["fov"], 60.0), near=_as_float(lens["near"], 0.3),
             far=_as_float(lens["far"], 1000.0), orthographic=bool(lens["ortho"]),
             orthographic_size=_as_float(lens["ortho_size"], 5.0), disabled=disabled)
