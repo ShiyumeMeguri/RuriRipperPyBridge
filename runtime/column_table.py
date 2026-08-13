@@ -44,6 +44,11 @@ class ColumnTable:
                 # shows up as wrong cell contents rather than as an error.
                 blobs.append(raw.decode("utf-8"))
                 offsets.append(_utf16_offsets(raw, np.frombuffer(bytes(dto.Offsets[index]), dtype=np.int32)))
+            elif kind == "blob":
+                # Payload bytes stay bytes: a blob column carries geometry, curve
+                # or pose payloads whose shape only the reader of that column knows.
+                blobs.append(raw)
+                offsets.append(np.frombuffer(bytes(dto.Offsets[index]), dtype=np.int32).astype(np.int64))
             elif kind == "int":
                 blobs.append(np.frombuffer(raw, dtype=np.int64))
                 offsets.append(None)
@@ -65,7 +70,7 @@ class ColumnTable:
 
     def cell(self, row, column):
         index = self.index_of(column)
-        if self._kinds[index] == "text":
+        if self._kinds[index] in ("text", "blob"):
             start, end = self._offsets[index][row], self._offsets[index][row + 1]
             return self._blobs[index][start:end]
         return self._blobs[index][row].item()
@@ -74,7 +79,7 @@ class ColumnTable:
         """Whole column. Text comes back as a python list (built once, cached);
         scalars stay a numpy view over the original buffer."""
         index = self.index_of(column)
-        if self._kinds[index] != "text":
+        if self._kinds[index] not in ("text", "blob"):
             return self._blobs[index]
         cached = self._text_cache.get(index)
         if cached is None:

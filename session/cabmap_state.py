@@ -259,7 +259,7 @@ def reset():
     clear_animation_build_state()
 
 
-def ensure_bridge(hook_ids):
+def ensure_bridge(hook_ids, game_root):
     """Get (or lazily create) the process-wide bridge, with its hook selection kept in
     sync with hook_ids on every call -- NOT just on first construction.
 
@@ -280,10 +280,11 @@ def ensure_bridge(hook_ids):
     instead of dropping it the way constructing a fresh RipperBridge would."""
     global BRIDGE
     hook_ids = tuple(hook_ids)
+    game_root = str(game_root or "")
     if BRIDGE is None:
-        BRIDGE = pythonnet_bridge.RipperBridge(hook_ids)
-    elif BRIDGE.hook_ids != hook_ids:
-        BRIDGE.reinitialize(hook_ids)
+        BRIDGE = pythonnet_bridge.RipperBridge(hook_ids, game_root)
+    elif BRIDGE.hook_ids != hook_ids or BRIDGE.game_root != game_root:
+        BRIDGE.reinitialize(hook_ids, game_root)
     return BRIDGE
 
 

@@ -399,11 +399,23 @@ def _flat_rules(rules):
     return _string_array(flat) if flat else None
 
 
-def _as_root_list(vfs_roots):
-    """VFS-root parameters accept either one path (str) or a priority-ordered
-    list of paths -- normalize to a list so callers don't have to remember
-    to wrap a single root themselves."""
-    return [vfs_roots] if isinstance(vfs_roots, str) else list(vfs_roots)
+def _named_args(args):
+    """Dataset arguments in the wire form the kernel binds by NAME: a flat
+    ``[name, value, name, value, ...]``. A value that is a list or tuple repeats
+    its name once per entry, which is exactly how a list-kind parameter (roots,
+    scene states, column specs) is stated -- so order inside one name is kept and
+    no separator is invented to smuggle several values through one string."""
+    flat = []
+    for name, value in args.items():
+        if isinstance(value, (list, tuple, set, frozenset)):
+            for entry in value:
+                flat.extend((str(name), str(entry)))
+            continue
+        if isinstance(value, bool):
+            flat.extend((str(name), "1" if value else "0"))
+            continue
+        flat.extend((str(name), str(value)))
+    return _string_array(flat)
 
 
 class RipperBridge:
@@ -413,11 +425,16 @@ class RipperBridge:
     single active session per the CLI's own model (see RipperBlenderBridge's
     doc comments on GameFileLoader/GameBundleHook static state)."""
 
-    def __init__(self, hook_ids):
+    def __init__(self, hook_ids, game_root):
         _ensure_runtime()
         self._bridge = _bridge_type
-        self._bridge.Initialize(_string_array(hook_ids))
+        self._bridge.Initialize(_string_array(hook_ids), str(game_root or ""))
         self._hook_ids = tuple(hook_ids)
+        self._game_root = str(game_root or "")
+        # game name -> the install that game's datasets read, captured when its
+        # cabmap loaded. use_game re-opens the session on it, so a dataset never
+        # has to be told where the game is installed.
+        self._roots_by_game = {}
         self._map = None
         # Per-game cabmap slots. maps_by_game is game name -> loaded map handle;
         # _game_hooks_by_game is game name -> the game-hook id(s) active when that
@@ -448,7 +465,14 @@ class RipperBridge:
         """The hook id set this session was last (re)Initialize()d with -- see reinitialize()."""
         return self._hook_ids
 
-    def reinitialize(self, hook_ids):
+    @property
+    def game_root(self):
+        """The install this session is open on. The hook that decodes it declares
+        which folders under it hold content (Session.DeclareLayout), so nothing
+        above this line ever spells an install layout."""
+        return self._game_root
+
+    def reinitialize(self, hook_ids, game_root=None):
         """Re-apply a (possibly different) hook selection onto this SAME session, preserving
         self._map/clip_curves_by_guid -- unlike constructing a fresh RipperBridge, this does not
         drop an already-loaded cabmap. Safe/idempotent on the C# side (RipperBlenderBridge.
@@ -457,8 +481,10 @@ class RipperBridge:
         than once per process"), so this is cheap even when hook_ids is unchanged. Callers should
         still skip the call when hook_ids == self.hook_ids to avoid the log spam ApplyHooks prints
         per hook transition."""
-        self._bridge.Initialize(_string_array(hook_ids))
+        root = self._game_root if game_root is None else str(game_root or "")
+        self._bridge.Initialize(_string_array(hook_ids), root)
         self._hook_ids = tuple(hook_ids)
+        self._game_root = root
 
     @property
     def has_map(self):
@@ -490,6 +516,7 @@ class RipperBridge:
             self.maps_by_game[game] = handle
             game_hooks = self._game_hook_id_set()
             self._game_hooks_by_game[game] = tuple(h for h in self._hook_ids if h in game_hooks)
+            self._roots_by_game[game] = self._game_root
 
     def use_game(self, game):
         """Select a previously loaded game's cabmap (load_cab_map(path, game=...)) as
@@ -508,8 +535,9 @@ class RipperBridge:
         target = self._game_hooks_by_game.get(game, ())
         non_game = [h for h in self._hook_ids if h not in game_hooks]
         desired = list(target) + [h for h in non_game if h not in target]
-        if set(desired) != set(self._hook_ids):
-            self.reinitialize(desired)
+        root = self._roots_by_game.get(game, self._game_root)
+        if set(desired) != set(self._hook_ids) or root != self._game_root:
+            self.reinitialize(desired, root)
 
     def enumerate_table(self):
         """The row set as a columnar row_table.RowTable -- raw blob/offset
@@ -625,39 +653,34 @@ class RipperBridge:
         return str(self._bridge.OpenHostTable(str(handle), _string_array(list(columns)),
                                               _string_array(flat)))
 
-    def list_game_data(self):
-        """What the ACTIVE game publishes: ``[{id, parameters, kind, description}]``.
+    def game_data(self, dataset_id, cancellation=None, **args):
+        """One published dataset, as a column_table.ColumnTable.
 
-        A host lists this instead of hardcoding dataset ids, so a panel can be told
-        what it may ask for rather than shipping a copy of the answer that goes
-        stale. Empty when no game hook is enabled."""
-        flat = [str(item) for item in self._bridge.ListGameData()]
-        return [{"id": flat[index], "parameters": [p for p in flat[index + 1].split(",") if p],
-                 "kind": flat[index + 2], "description": flat[index + 3]}
-                for index in range(0, len(flat), 4)]
+        This is the ONE way data crosses: whatever is read -- a parts catalog, a
+        scene list, a build plan, a face's pattern table, the session's own
+        description -- arrives in the same columnar shape, already searchable under
+        ``table.handle`` (pass it to search_data_table) and cached on the C# side by
+        (id, args). Arguments are passed BY NAME (``game_data(id, map="map01",
+        sceneState=[1, 2])``): the kernel validates them against what that dataset
+        declares, so a wrong name fails loudly here instead of silently shifting
+        every later argument along. Nothing is parsed on this side.
 
-    def game_data(self, dataset_id, *args, cancellation=None):
-        """One dataset the active game publishes, as a column_table.ColumnTable.
-
-        This is the ONE way game data crosses: whatever a game reads -- a parts
-        catalog, a scene list, a build plan, a face's pattern table -- arrives in
-        the same columnar shape, already searchable under ``table.handle`` (pass it
-        to search_data_table) and cached on the C# side by (id, args). Nothing is
-        parsed here."""
+        ``core.datasets`` is the one id worth knowing: it lists every dataset this
+        session publishes, with the role a caller binds it by."""
         import System.Threading
         from . import column_table
         token = cancellation if cancellation is not None \
             else getattr(System.Threading.CancellationToken, "None")
         return column_table.ColumnTable.from_packed(self._bridge.GameDataTable(
-            self._map, str(dataset_id), _string_array([str(arg) for arg in args]), token))
+            self._map, str(dataset_id), _named_args(args), token))
 
-    def game_data_blob(self, dataset_id, *args, cancellation=None):
+    def game_data_blob(self, dataset_id, cancellation=None, **args):
         """One published dataset whose payload is bytes rather than rows."""
         import System.Threading
         token = cancellation if cancellation is not None \
             else getattr(System.Threading.CancellationToken, "None")
         return bytes(self._bridge.GameDataBlob(
-            self._map, str(dataset_id), _string_array([str(arg) for arg in args]), token))
+            self._map, str(dataset_id), _named_args(args), token))
 
     def scan_cabs(self, cab_names):
         """Load + process the closure, build the object graph, export NOTHING.
