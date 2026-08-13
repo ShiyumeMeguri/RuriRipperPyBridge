@@ -11,6 +11,10 @@ the dimension when computing stream strides, and we only trust a decoded normal
 when it forms a sane unit-length field — otherwise the caller recomputes normals
 from geometry, which is always correct.
 
+A game that packs a whole tangent frame into one word is NOT decoded here: that
+bit layout is the game's own fact and is unpacked on the read path by that
+game's hook, so this module only ever sees standard Unity channels.
+
 This module is pure (numpy only) so it can be unit-tested outside Blender.
 """
 
@@ -68,40 +72,6 @@ def _real_dimension(dim):
 def _format_size(fmt):
     entry = _FORMAT.get(fmt)
     return entry[1] if entry else 4
-
-
-PACKED_CHANNEL_DECODERS = []
-"""调用方注入的**私有打包通道**解码器(内核只内置真正标准的格式)。
-
-标准格式(R10G10B10A2 的 snorm/unorm 读法)内置在下面;而各家自研的位布局 —— 谁占哪几位、
-哪一位是标志、切线角怎么编 —— 是**资产方的事实**,内核不该知道,故由调用方注册进来:
-
-    fn(channel_index, words) -> (n,3) 法线 / (n,4) 切线 float32,或 None 表示不认领
-
-``channel_index`` 是 Unity VertexAttribute 序号(NORMAL / TANGENT);``words`` 是该通道的
-(n,) uint32 原始字。返回的**法线**候选仍要过内核的几何相关性判据 —— 单位长的编码骗得过
-长度门,只有和真实面法线的相关性能裁决;**切线**没有等价的通用判据,认领即采用。
-"""
-
-
-def register_packed_channel_decoder(fn):
-    if fn not in PACKED_CHANNEL_DECODERS:
-        PACKED_CHANNEL_DECODERS.append(fn)
-
-
-def unregister_packed_channel_decoder(fn):
-    if fn in PACKED_CHANNEL_DECODERS:
-        PACKED_CHANNEL_DECODERS.remove(fn)
-
-
-def _injected(channel_index, words):
-    """注册的解码器逐个试;返回全部认领结果(法线可能多个候选)。"""
-    out = []
-    for decoder in PACKED_CHANNEL_DECODERS:
-        got = decoder(channel_index, words)
-        if got is not None:
-            out.append(got)
-    return out
 
 
 def _unpack_normal_10_10_10(words):
@@ -241,15 +211,17 @@ def _decode_vertex_channels(mesh, blob, channels, count):
             packed_words = decoded.view(np.uint32).reshape(-1) if decoded.dtype == np.float32 \
                 else decoded.astype(np.uint32).reshape(-1)
             candidates.extend(_unpack_normal_10_10_10(packed_words))
-            # 注入的私有布局多半解出来天然是单位长(如八面体),下面的长度门对它没有
-            # 鉴别力,故一律交给几何相关性判据(_resolve_packed_normals)裁决。
-            packed_candidates.extend(_injected(NORMAL, packed_words))
         for cand in candidates:
             lengths = np.linalg.norm(cand, axis=1)
             # Trust stored normals only if they are predominantly unit length.
             if np.mean(np.abs(lengths - 1.0) < 0.15) > 0.9:
                 mesh.normals = cand / np.clip(lengths[:, None], 1e-6, None)
                 break
+        if mesh.normals is None:
+            # Nothing looked unit length, so the length gate has no answer.
+            # Hand every candidate to the geometric arbiter instead -- it can
+            # only fill in normals that would otherwise be missing entirely.
+            packed_candidates.extend(candidates)
 
     tan_ch = ch(TANGENT)
     if tan_ch and _real_dimension(tan_ch.get("dimension")) >= 3:
@@ -258,17 +230,11 @@ def _decode_vertex_channels(mesh, blob, channels, count):
         if np.mean(np.abs(tl - 1.0) < 0.15) > 0.9:
             mesh.tangents = t if t.shape[1] == 4 else np.pad(t, ((0, 0), (0, 4 - t.shape[1])), constant_values=1.0)
     elif tan_ch and _real_dimension(tan_ch.get("dimension")) == 1:
-        # 一个数装不下切线 ⇒ 私有打包。内核没有标准读法,交注册的解码器认领;
-        # 切线没有等价于法线那样的通用判据,所以首个认领者直接采用。
-        raw = _decode_channel(blob, stream_offsets, stream_strides, tan_ch, count)
-        words = (np.ascontiguousarray(raw[:, 0], dtype=np.float32).view(np.uint32)
-                 if raw.dtype == np.float32 else raw[:, 0].astype(np.uint32))
-        claimed = _injected(TANGENT, words)
-        if claimed:
-            mesh.tangents = claimed[0]
-        else:
-            print("[mesh-decoder] 单分量 TANGENT 无人认领(未注册对应的打包解码器),切线留空",
-                  flush=True)
+        # 一个数装不下切线 ⇒ 某家自研的位打包。那是资产方的事实,该由读取该游戏的
+        # hook 在读路径上解开(见 EndfieldVertexFrame),到这里还是单分量就说明没人解,
+        # 而内核没有可猜的标准读法。
+        print("[mesh-decoder] 单分量 TANGENT:该游戏的顶点打包没有在读路径解开,切线留空",
+              flush=True)
 
     col_ch = ch(COLOR)
     if col_ch and _real_dimension(col_ch.get("dimension")):
