@@ -45,6 +45,18 @@ class RowView:
             return self._table.field(self._index, key)
         return default
 
+    def container_path(self, path_index=0):
+        """ONE raw container path of this row, empty when it has none.
+
+        ``row["container"]`` is the DISPLAY join of every path a row carries
+        ("a  |  b", capped with a "+N more names" tail) -- a label, not a path.
+        A caller that wants the folder an asset lives in asks for this instead,
+        so nothing ends up parsing that join as if it were a single path."""
+        count = self._table.container_path_count(self._index)
+        if count == 0:
+            return ""
+        return self._table.container_path(self._index, min(max(path_index, 0), count - 1))
+
     def keys(self):
         return _ROW_KEYS
 

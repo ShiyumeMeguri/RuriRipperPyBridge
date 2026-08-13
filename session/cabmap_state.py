@@ -37,7 +37,16 @@ from ..runtime import pythonnet_bridge
 # per-game sessions (SESSIONS/ACTIVE) and BRIDGE all ride through a reload intact.
 HOLDS_PROCESS_STATE = True
 
-DISPLAY_CAP = 500  # max rows ever materialized into the UI at once
+# The bundle browser's own budget: it lists a 260k-row cabmap, where materializing
+# a match set whole would cost seconds per keystroke. It is a BROWSER number, not a
+# general one -- a list whose whole result set is in the thousands materializes all
+# of it (see LIST_CAP) so the user can simply scroll, rather than being cut off at
+# a boundary that looks exactly like "the game has no more of these".
+DISPLAY_CAP = 500  # max cabmap rows ever materialized into the browser at once
+# What any other list may materialize. Sized so every published list (2084 npcs,
+# 963 story actors, 509 story units) lands whole and scrolls natively; a list that
+# would exceed it is truncated AND says so, never silently.
+LIST_CAP = 20000
 SEARCH_DEBOUNCE_SECONDS = 0.25  # the host's own timer applies this
 
 # The CLR session, process-wide and shared by every game's cabmap (its _map is

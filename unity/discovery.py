@@ -118,9 +118,11 @@ def prefab_name_index(db, roots):
 # AnimationClip discovery
 # ---------------------------------------------------------------------------
 def discover_clip_refs(db, prefab):
-    """Lightweight metadata ({guid, name, size_bytes}) for every AnimationClip
-    reachable from a prefab: the ones its Animator controller references (at
-    any depth) plus every AnimationClip document present in the closure.
+    """Lightweight metadata ({guid, name, size_bytes, path}) for every
+    AnimationClip reachable from a prefab: the ones its Animator controller
+    references (at any depth) plus every AnimationClip document present in the
+    closure. ``path`` is where the export wrote it, i.e. the game's own folder
+    for that clip -- what a browser groups a few hundred clips by.
 
     Deliberately does NOT parse them -- browsing what is available must not pay
     to decode every clip up front; that cost belongs to whichever clips the user
@@ -138,7 +140,8 @@ def discover_clip_refs(db, prefab):
         if class_name != "AnimationClip":
             return
         seen_ids.add(guid)
-        refs.append({"guid": guid, "name": name or guid, "size_bytes": len(text)})
+        refs.append({"guid": guid, "name": name or guid, "size_bytes": len(text),
+                     "path": db.asset_path(guid) or ""})
 
     animator = prefab.first("Animator")
     controller_ref = animator.data.get("m_Controller") if animator is not None else None

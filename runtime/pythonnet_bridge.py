@@ -412,6 +412,33 @@ def _flat_rules(rules):
     return _string_array(flat) if flat else None
 
 
+def _wire(value):
+    """One argument value in the spelling the kernel reads it back in.
+
+    Python and the kernel agree on every finite number's shortest round-trip text
+    and disagree on exactly three words: Python writes ``inf``/``-inf``/``nan``
+    where the kernel's own number format writes ``Infinity``/``-Infinity``/
+    ``NaN``. That is not a corner case -- an unbounded world rect (import this
+    whole map, rather than one place in it) IS stated as two infinities, and the
+    kernel rejected it as "must be a number".
+
+    The kernel declares the format because it declares the parameter; converting
+    at this boundary is what keeps one spelling instead of two parsers."""
+    if isinstance(value, bool):
+        return "1" if value else "0"
+    if isinstance(value, float):
+        if value != value:
+            return "NaN"
+        if value == _INFINITY:
+            return "Infinity"
+        if value == -_INFINITY:
+            return "-Infinity"
+    return str(value)
+
+
+_INFINITY = float("inf")
+
+
 def _named_args(args):
     """Dataset arguments in the wire form the kernel binds by NAME: a flat
     ``[name, value, name, value, ...]``. A value that is a list or tuple repeats
@@ -422,12 +449,9 @@ def _named_args(args):
     for name, value in args.items():
         if isinstance(value, (list, tuple, set, frozenset)):
             for entry in value:
-                flat.extend((str(name), str(entry)))
+                flat.extend((str(name), _wire(entry)))
             continue
-        if isinstance(value, bool):
-            flat.extend((str(name), "1" if value else "0"))
-            continue
-        flat.extend((str(name), str(value)))
+        flat.extend((str(name), _wire(value)))
     return _string_array(flat)
 
 
