@@ -82,6 +82,10 @@ MRO_NAMES = ["_MROMap"]
 METALLIC_GLOSS_NAMES = ["_MetallicGlossMap", "_SpecGlossMap"]
 
 BASE_COLOR_FACTORS = ["_BaseColor", "_Color", "_MainColor", "_TintColor"]
+# The colour an emission map is multiplied by (Unity Standard's `_EmissionColor`
+# -- BLACK means "emission off" even with a map bound, so a consumer that skips
+# the multiply makes every such material glow at full map brightness).
+EMISSION_COLOR_FACTORS = ["_EmissionColor", "_EmissiveColor"]
 
 # Last-resort fallback when a shader family isn't covered by the curated lists:
 # substrings to look for in ANY texture property name. Safe for these three

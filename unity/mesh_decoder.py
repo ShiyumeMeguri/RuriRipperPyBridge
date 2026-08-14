@@ -22,10 +22,35 @@ from __future__ import annotations
 
 import numpy as np
 
-# Unity VertexAttribute order == channel index.
+# Semantic channel ids, in the MODERN (2018.1+) Unity VertexAttribute order --
+# for 14-channel meshes the semantic IS the channel index.
 (POSITION, NORMAL, TANGENT, COLOR,
  UV0, UV1, UV2, UV3, UV4, UV5, UV6, UV7,
  BLEND_WEIGHT, BLEND_INDICES) = range(14)
+
+# Unity <= 2017 serializes EXACTLY 8 vertex channels, in its own older order --
+# a different dialect of the same table, told apart by the channel COUNT the
+# file itself declares (a structural fact of the serialized version, not a
+# guess). Reading an old mesh with the modern order silently shifts every
+# semantic: the real TexCoord0 (slot 3) lands on COLOR, TexCoord1 (slot 4 --
+# routinely the lightmap UV) becomes the texture UV, and the Tangent (slot 7,
+# dim=4) turns into a bogus "UV3" layer. Measured on Koikatu (Unity 5.6): every
+# scene mesh textured off its lightmap UV, which reads as "all UVs wrong".
+_LEGACY_CHANNEL_SLOTS = {
+    POSITION: 0, NORMAL: 1, COLOR: 2,
+    UV0: 3, UV1: 4, UV2: 5, UV3: 6,
+    TANGENT: 7,
+}
+
+
+def _channel_slots(channel_count):
+    """{semantic id -> declared channel index} for this mesh's dialect. Modern
+    files map identically; legacy files remap, and semantics they cannot carry
+    (TexCoord4..7, blend weights/indices -- pre-2018 skin lives in m_Skin, see
+    _apply_legacy_skin) are simply absent."""
+    if channel_count <= 8:
+        return _LEGACY_CHANNEL_SLOTS
+    return {semantic: semantic for semantic in range(14)}
 
 # VertexAttributeFormat -> (numpy dtype, byte size, is_normalised, is_int).
 _FORMAT = {
@@ -185,9 +210,11 @@ def _decode_vertex_channels(mesh, blob, channels, count):
         running += stream_strides[stream] * count
 
     packed_candidates = []
+    slots = _channel_slots(len(channels))
 
-    def ch(i):
-        return channels[i] if i < len(channels) else None
+    def ch(semantic):
+        index = slots.get(semantic)
+        return channels[index] if index is not None and index < len(channels) else None
 
     pos_ch = ch(POSITION)
     if pos_ch and _real_dimension(pos_ch.get("dimension")):
@@ -240,8 +267,8 @@ def _decode_vertex_channels(mesh, blob, channels, count):
         c = _decode_channel(blob, stream_offsets, stream_strides, col_ch, count)
         mesh.colors = c if c.shape[1] == 4 else np.pad(c, ((0, 0), (0, 4 - c.shape[1])), constant_values=1.0)
 
-    for layer, ci in enumerate(range(UV0, UV7 + 1)):
-        uch = ch(ci)
+    for layer, semantic in enumerate(range(UV0, UV7 + 1)):
+        uch = ch(semantic)
         if uch and _real_dimension(uch.get("dimension")) >= 2:
             mesh.uvs[layer] = _decode_channel(blob, stream_offsets, stream_strides, uch, count)[:, :2]
 
