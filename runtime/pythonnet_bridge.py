@@ -496,6 +496,9 @@ class RipperBridge:
         # {guid -> exported path (real name + extension)} for the LAST
         # import_cabs call -- every asset's display identity.
         self.asset_paths_by_guid = {}
+        # {seed container path -> exported guid} from the LAST import_reachable
+        # call -- the placement-to-asset join (see ImportReachable).
+        self.seed_asset_guids_by_path = {}
 
     @property
     def hook_ids(self):
@@ -777,8 +780,37 @@ class RipperBridge:
             else _string_array([str(key) for key in export_asset_keys])
         result = self._bridge.ImportCabs(self._map, _string_array(cab_names), class_ids,
                                          asset_keys, bool(want_graph), formats)
-        # .NET IReadOnlyDictionary crosses into Python as an iterable of
-        # KeyValuePair (no dict-like .items()) -- iterate and pull .Key/.Value.
+        return self._absorb_closure(result)
+
+    def import_reachable(self, seed_container_paths, excluded_class_names=()):
+        """The massed-placement crossing: RipperBlenderBridge.ImportReachable.
+
+        Takes the window's distinct seed CONTAINER PATHS (mesh paths with their
+        "##sub" suffixes, prefab paths, material paths -- exactly a scene
+        discovery's seed_paths), resolves and loads their dependency closure in
+        full, but exports ONLY what is reachable from those seeds over real
+        reference edges, minus ``excluded_class_names`` (Unity class names,
+        validated against the kernel's own ClassIDType -- an unknown name raises
+        rather than silently excluding nothing). Same return tuple and the same
+        absorbed side maps as import_cabs, plus ``seed_asset_guids_by_path``:
+        {seed path -> exported guid}, the entire placement-to-asset join --
+        no name-index scan over the closure exists on this side anymore."""
+        if self._map is None:
+            raise RuntimeError("No cabmap loaded -- call load_cab_map()/build_cab_map() (or use_game(game) "
+                               "to select a loaded game's map) first.")
+        formats = _string_array(_texture_formats)
+        excluded = _string_array([str(name) for name in excluded_class_names]) \
+            if excluded_class_names else None
+        result = self._bridge.ImportReachable(
+            self._map, _string_array([str(path) for path in seed_container_paths]),
+            excluded, formats)
+        return self._absorb_closure(result)
+
+    def _absorb_closure(self, result):
+        """Unpack a ClosureResult -- the ONE decoder for every closure-shaped
+        crossing (import_cabs / import_reachable), so the two can never drift.
+        .NET IReadOnlyDictionary crosses into Python as an iterable of
+        KeyValuePair (no dict-like .items()) -- iterate and pull .Key/.Value."""
         assets = {str(kvp.Key).lower(): bytes(kvp.Value) for kvp in result.Assets}
         roots = [str(g).lower() for g in result.Roots]
         seed_roots = {str(kvp.Key): str(kvp.Value).lower() for kvp in result.SeedRoots}
@@ -791,7 +823,7 @@ class RipperBridge:
         # the same curves the YAML documents carry, handed over as raw numbers so
         # clip building never re-parses them out of 80+MB of text. Exposed as an
         # attribute (not another tuple slot) so every existing 6-tuple unpacker
-        # keeps working; replaced wholesale on each import_cabs call. bytes() on a
+        # keeps working; replaced wholesale on each closure call. bytes() on a
         # .NET byte[] is a straight memcpy.
         self.clip_curves_by_guid = {}
         meta_by_guid = {str(kvp.Key).lower(): str(kvp.Value) for kvp in result.ClipCurveMeta}
@@ -825,10 +857,15 @@ class RipperBridge:
         # this call just materialized. Guids never leave the batch; keys do.
         self.clip_guid_by_key = {str(kvp.Key): str(kvp.Value).lower()
                                  for kvp in result.ClipGuidByAssetKey}
-        # The closure's object graph, only when this call asked for it -- see
-        # scan_cabs and the want_graph note above.
+        # Seed container path -> exported guid (ImportReachable's join; empty for
+        # import_cabs). Keys keep their exact seed spelling, values lowercase like
+        # every other guid on this side.
+        self.seed_asset_guids_by_path = {str(kvp.Key): str(kvp.Value).lower()
+                                         for kvp in result.SeedAssetGuids}
+        # The closure's object graph, only when the call asked for it -- see scan_cabs.
         from ..unity import closure_graph
+        graph_meta = str(result.GraphMetaJson)
         self.closure_graph = closure_graph.ClosureGraph.from_blob(
-            str(result.GraphMetaJson), bytes(result.GraphPayload)) if want_graph else None
+            graph_meta, bytes(result.GraphPayload)) if graph_meta else None
         return assets, roots, seed_roots, clips_by_cab, scene_roots
 

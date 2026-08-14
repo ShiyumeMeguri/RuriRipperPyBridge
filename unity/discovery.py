@@ -83,11 +83,6 @@ def name_index(db, class_name):
     return index
 
 
-def mesh_name_index(db):
-    """{lowercased Mesh m_Name -> guid} -- see ``name_index``."""
-    return name_index(db, "Mesh")
-
-
 def material_name_index(db):
     """{lowercased Material m_Name -> guid} -- see ``name_index``. Joins a scene
     placement's own material_asset_paths (the entity's real material hash,

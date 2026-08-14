@@ -35,6 +35,8 @@ Pure numpy, so all of it is testable with no host application present.
 
 from __future__ import annotations
 
+import math
+
 import numpy as np
 
 
@@ -105,6 +107,19 @@ class Space:
         For a top-level import object only; det(R) = +1 so winding and tangents
         are untouched. An identity input yields R itself."""
         return self.root_rotation @ self.convert_matrix(unity_matrix)
+
+    def convert_matrices(self, unity_matrices):
+        """convert_matrix over an (n, 4, 4) stack in one broadcast matmul --
+        the massed-placement path, where n runs to 10^5 and a python-level
+        loop over conjugations would be the cost."""
+        mats = np.asarray(unity_matrices, dtype=np.float64)
+        return self.matrix[None] @ mats @ self.matrix[None]
+
+    def convert_root_matrices(self, unity_matrices):
+        """convert_root_matrix over an (n, 4, 4) stack: ``R @ C @ M @ C``,
+        batched. Every row is a TOP-LEVEL object's world matrix (a scene
+        placement); the root yaw applies once per row by construction."""
+        return self.root_rotation[None] @ self.convert_matrices(unity_matrices)
 
     def convert_points(self, points):
         """Convert an (n, 3) array of Unity positions -- or of directions such
@@ -203,7 +218,11 @@ def unity_trs(position, rotation, scale):
     y = float(rotation.get("y", 0.0))
     z = float(rotation.get("z", 0.0))
     w = float(rotation.get("w", 1.0))
-    norm = (x * x + y * y + z * z + w * w) ** 0.5
+    # math.sqrt, not ``** 0.5``: the power operator goes through libm ``pow``,
+    # which is not required to be correctly rounded and measurably is not (1 ULP
+    # off on ~0.04% of real quaternions), while sqrt is IEEE-correctly-rounded.
+    # That is also what the batched path computes, so the two agree bitwise.
+    norm = math.sqrt(x * x + y * y + z * z + w * w)
     if norm > 1e-12:
         x, y, z, w = x / norm, y / norm, z / norm, w / norm
     else:
@@ -225,6 +244,50 @@ def unity_trs(position, rotation, scale):
     matrix[1, 3] = float(position.get("y", 0.0))
     matrix[2, 3] = float(position.get("z", 0.0))
     return matrix
+
+
+def unity_trs_batch(positions, quaternions, scales):
+    """(n, 4, 4) Unity-space TRS matrices from columnar components, all at once:
+    ``positions``/``scales`` are (n, 3), ``quaternions`` (n, 4) in x/y/z/w order
+    -- exactly the columns a placement table carries. The same math as
+    ``unity_trs`` (normalize, quaternion-to-matrix, R @ diag(S), translate),
+    vectorized so 10^5 placements are ~a dozen numpy passes rather than 10^5
+    python-level constructions. Stays in UNITY space; conversion is the
+    separate, explicit step (``Space.convert_root_matrices``)."""
+    pos = np.asarray(positions, dtype=np.float64)
+    quat = np.asarray(quaternions, dtype=np.float64)
+    scl = np.asarray(scales, dtype=np.float64)
+    n = len(pos)
+
+    # Summed column by column in the SAME order as the scalar unity_trs above --
+    # np.linalg.norm reassociates and lands a last-bit different length, which
+    # propagates into every matrix entry (measured: 3.6e-15 worst case). Same
+    # order here means the batch is bitwise equal to the per-row build, which is
+    # what makes this a lossless rewrite rather than an almost-equal one.
+    squared = quat * quat
+    norms = np.sqrt(squared[:, 0] + squared[:, 1] + squared[:, 2] + squared[:, 3])[:, None]
+    unit = np.divide(quat, norms, out=np.zeros_like(quat), where=norms > 1e-12)
+    degenerate = (norms <= 1e-12).reshape(-1)
+    if degenerate.any():
+        unit[degenerate] = (0.0, 0.0, 0.0, 1.0)
+    x, y, z, w = unit[:, 0], unit[:, 1], unit[:, 2], unit[:, 3]
+
+    rot = np.empty((n, 3, 3), dtype=np.float64)
+    rot[:, 0, 0] = 1.0 - 2.0 * (y * y + z * z)
+    rot[:, 0, 1] = 2.0 * (x * y - z * w)
+    rot[:, 0, 2] = 2.0 * (x * z + y * w)
+    rot[:, 1, 0] = 2.0 * (x * y + z * w)
+    rot[:, 1, 1] = 1.0 - 2.0 * (x * x + z * z)
+    rot[:, 1, 2] = 2.0 * (y * z - x * w)
+    rot[:, 2, 0] = 2.0 * (x * z - y * w)
+    rot[:, 2, 1] = 2.0 * (y * z + x * w)
+    rot[:, 2, 2] = 1.0 - 2.0 * (x * x + y * y)
+
+    matrices = np.zeros((n, 4, 4), dtype=np.float64)
+    matrices[:, :3, :3] = rot * scl[:, None, :]   # R @ diag(S), rowwise
+    matrices[:, :3, 3] = pos
+    matrices[:, 3, 3] = 1.0
+    return matrices
 
 
 def transform_points(matrix, points):

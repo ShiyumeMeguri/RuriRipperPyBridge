@@ -130,7 +130,14 @@ class DecodedMesh:
 
 
 def _decode_channel(blob, stream_offsets, stream_strides, channel, count):
-    """Decode one channel into an (count, dim) float array (or int for indices)."""
+    """Decode one channel into an (count, dim) float array (or int for indices).
+
+    The vertex buffer IS an array of stride-sized records with this channel's
+    field at a fixed offset inside each -- exactly what a numpy structured
+    dtype states. One zero-copy strided view plus one astype replaces the old
+    per-byte int64 index-matrix gather, which built an (n, field_bytes) index
+    and fancy-indexed the whole buffer through it (8 index bytes paid per data
+    byte, per channel, per mesh)."""
     stream = channel.get("stream", 0)
     offset = channel.get("offset", 0)
     fmt = channel.get("format", 0)
@@ -139,20 +146,12 @@ def _decode_channel(blob, stream_offsets, stream_strides, channel, count):
         return None
     dtype, size, normalised, is_int = _FORMAT.get(fmt, (np.float32, 4, False, False))
     stride = stream_strides[stream]
-    base = stream_offsets[stream] + offset
-    # Gather the bytes for this channel across all vertices via a strided view.
-    raw = np.frombuffer(blob, dtype=np.uint8)
-    # Build an index matrix: for each vertex, the `size*dim` bytes of the field.
-    field_bytes = size * dim
-    starts = base + np.arange(count, dtype=np.int64) * stride
-    idx = starts[:, None] + np.arange(field_bytes, dtype=np.int64)[None, :]
-    gathered = raw[idx].reshape(count, dim, size)
-    values = gathered.reshape(count * dim, size)
-    # Pad to the dtype width and reinterpret.
-    out = np.ascontiguousarray(values).view(dtype).reshape(count, dim)
+    record = np.dtype({"names": ["v"], "formats": [(np.dtype(dtype).newbyteorder("<"), (dim,))],
+                       "offsets": [offset], "itemsize": stride})
+    view = np.frombuffer(blob, dtype=record, count=count, offset=stream_offsets[stream])["v"]
     if is_int:
-        return out.astype(np.int32)
-    out = out.astype(np.float32)
+        return view.astype(np.int32)
+    out = view.astype(np.float32)
     if normalised:
         if np.issubdtype(dtype, np.signedinteger):
             out = np.maximum(out / float(np.iinfo(dtype).max), -1.0)
