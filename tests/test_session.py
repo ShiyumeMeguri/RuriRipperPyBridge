@@ -78,11 +78,29 @@ class TestSessionIsolation(unittest.TestCase):
         self.assertIsNot(a, b)
         self.assertIs(cabmap_state.session_for("__test_ef__"), a)
 
-    def test_active_game_follows_activate(self):
+    def test_active_key_follows_activate(self):
         cabmap_state.activate("__test_ef__")
-        self.assertEqual(cabmap_state.active_game(), "__test_ef__")
+        self.assertEqual(cabmap_state.active_key(), "__test_ef__")
         cabmap_state.activate("__test_kk__")
-        self.assertEqual(cabmap_state.active_game(), "__test_kk__")
+        self.assertEqual(cabmap_state.active_key(), "__test_kk__")
+
+    def test_decoder_game_is_apart_from_the_install_key(self):
+        # Two installs of one title: distinct sessions, one game.
+        cabmap_state.activate("__test_ef__", "EndField")
+        self.assertEqual(cabmap_state.active_game(), "EndField")
+        cabmap_state.activate("__test_kk__", "EndField")
+        self.assertEqual(cabmap_state.active_key(), "__test_kk__")
+        self.assertEqual(cabmap_state.active_game(), "EndField")
+        self.assertEqual(cabmap_state.game_of("__test_ef__"), "EndField")
+
+    def test_rename_carries_the_session_over(self):
+        cabmap_state.activate("__test_ef__", "EndField")
+        _load_into_active(_EF_ROWS)
+        cabmap_state.rename("__test_ef__", "__test_kk__")
+        self.assertEqual(cabmap_state.active_key(), "__test_kk__")
+        self.assertEqual(cabmap_state.active_game(), "EndField")
+        self.assertEqual(len(cabmap_state.ROWS), 3)
+        self.assertNotIn("__test_ef__", cabmap_state.SESSIONS)
 
     def test_rows_and_tree_do_not_bleed_between_games(self):
         cabmap_state.activate("__test_ef__")

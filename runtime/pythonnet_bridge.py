@@ -468,20 +468,22 @@ class RipperBridge:
         self._bridge.Initialize(_string_array(hook_ids), str(game_root or ""))
         self._hook_ids = tuple(hook_ids)
         self._game_root = str(game_root or "")
-        # game name -> the install that game's datasets read, captured when its
-        # cabmap loaded. use_game re-opens the session on it, so a dataset never
+        # install key -> the folder that install's datasets read, captured when its
+        # cabmap loaded. use_session re-opens the session on it, so a dataset never
         # has to be told where the game is installed.
-        self._roots_by_game = {}
+        self._roots_by_key = {}
         self._map = None
-        # Per-game cabmap slots. maps_by_game is game name -> loaded map handle;
-        # _game_hooks_by_game is game name -> the game-hook id(s) active when that
-        # map loaded (its own decoder, kept apart from the AR_* feature hooks a
-        # switch preserves). use_game(game) flips self._map between them and, when
-        # the decoder differs, reinitializes onto it. Several games can be loaded
-        # at once (a CabMapHandle is a pure value object, safe to hold many of);
-        # only one game's decoder is ever active, which is what use_game switches.
-        self.maps_by_game = {}
-        self._game_hooks_by_game = {}
+        # Per-INSTALL cabmap slots, keyed by whatever identity the host files an
+        # install under (see cabmap_state.GameSession.key). maps_by_key is that key
+        # -> loaded map handle; _hooks_by_key is that key -> the game-hook id(s)
+        # active when that map loaded (its own decoder, kept apart from the AR_*
+        # feature hooks a switch preserves). use_session(key) flips self._map
+        # between them and, when the decoder differs, reinitializes onto it.
+        # Several installs can be loaded at once (a CabMapHandle is a pure value
+        # object, safe to hold many of); only one decoder is ever active, which is
+        # what use_session switches.
+        self.maps_by_key = {}
+        self._hooks_by_key = {}
         self._all_game_hooks = None
         # {clip guid -> (meta_json, payload_bytes)} from the LAST import_cabs
         # call -- the zero-parse curve fast path (see ClipCurveBlob.cs).
@@ -536,46 +538,57 @@ class RipperBridge:
 
     def _game_hook_id_set(self):
         """Every hook id the DLL classes as being about ONE GAME (ListGameHooks),
-        cached -- the set use_game splits a game's own decoder hooks out of the
+        cached -- the set use_session splits an install's own decoder hooks out of the
         AR_* feature hooks by."""
         if self._all_game_hooks is None:
             self._all_game_hooks = frozenset(str(h) for h in self._bridge.ListGameHooks())
         return self._all_game_hooks
 
-    def load_cab_map(self, cab_map_path, game=None):
+    def load_cab_map(self, cab_map_path, key=None):
         """Load an existing cabmap file; must be called (or build_cab_map) before
-        enumerate_rows()/import_cabs(). game=None just points the current _map at it
-        (the single-game path, unchanged). Passing a game name ALSO registers the map
-        in this session's per-game slot, capturing whichever game-hook(s) are active
-        now as that game's own decoder, so use_game(game) can switch back to it later
-        without reloading -- load each game's cabmap while that game's hook is the
-        ticked one, exactly as the panel does."""
+        enumerate_rows()/import_cabs(). key=None just points the current _map at it
+        (the single-install path, unchanged). Passing an install key ALSO registers
+        the map in this session's per-install slot, capturing whichever game-hook(s)
+        are active now as that install's own decoder, so use_session(key) can switch
+        back to it later without reloading -- load each install's cabmap while its
+        hook is the ticked one, exactly as the panel does."""
         handle = self._bridge.LoadCabMap(cab_map_path)
         self._map = handle
-        if game is not None:
-            self.maps_by_game[game] = handle
+        if key is not None:
+            self.maps_by_key[key] = handle
             game_hooks = self._game_hook_id_set()
-            self._game_hooks_by_game[game] = tuple(h for h in self._hook_ids if h in game_hooks)
-            self._roots_by_game[game] = self._game_root
+            self._hooks_by_key[key] = tuple(h for h in self._hook_ids if h in game_hooks)
+            self._roots_by_key[key] = self._game_root
 
-    def use_game(self, game):
-        """Select a previously loaded game's cabmap (load_cab_map(path, game=...)) as
-        the active _map and, when that game's decoder differs from what is active,
-        reinitialize onto it: the target game's own game-hook(s) PLUS every non-game
-        hook currently ticked (the AR_* features stay; one game's decoder replaces
-        another's, matching the upstream's mutually-exclusive game hooks). No-op on the
-        hook side when the target's decoder is already active, so repeated selects of
-        the same game are cheap. enumerate_table/search only need the _map switch;
-        import/game_data go through the freshly selected decoder."""
-        if game not in self.maps_by_game:
+    def rename_session(self, old_key, new_key):
+        """Refile every per-install slot from ``old_key`` to ``new_key`` -- the
+        already-loaded cabmap, its decoder and its root move together, so an
+        install that only just learned its own name keeps the map it paid for."""
+        if old_key == new_key:
+            return
+        for slot in (self.maps_by_key, self._hooks_by_key, self._roots_by_key):
+            if old_key in slot:
+                slot[new_key] = slot.pop(old_key)
+
+    def use_session(self, key):
+        """Select a previously loaded install's cabmap (load_cab_map(path, key=...))
+        as the active _map and, when that install's decoder differs from what is
+        active, reinitialize onto it: the target's own game-hook(s) PLUS every
+        non-game hook currently ticked (the AR_* features stay; one game's decoder
+        replaces another's, matching the upstream's mutually-exclusive game hooks).
+        No-op on the hook side when the target's decoder is already active, so
+        repeated selects of the same install are cheap. enumerate_table/search only
+        need the _map switch; import/game_data go through the freshly selected
+        decoder."""
+        if key not in self.maps_by_key:
             raise RuntimeError(
-                f"No cabmap loaded for game {game!r} -- call load_cab_map(path, game={game!r}) first.")
-        self._map = self.maps_by_game[game]
+                f"No cabmap loaded for install {key!r} -- call load_cab_map(path, key={key!r}) first.")
+        self._map = self.maps_by_key[key]
         game_hooks = self._game_hook_id_set()
-        target = self._game_hooks_by_game.get(game, ())
+        target = self._hooks_by_key.get(key, ())
         non_game = [h for h in self._hook_ids if h not in game_hooks]
         desired = list(target) + [h for h in non_game if h not in target]
-        root = self._roots_by_game.get(game, self._game_root)
+        root = self._roots_by_key.get(key, self._game_root)
         if set(desired) != set(self._hook_ids) or root != self._game_root:
             self.reinitialize(desired, root)
 
@@ -584,7 +597,7 @@ class RipperBridge:
         buffers in ONE interop crossing, nothing materialized per row (the
         load-path optimum; see row_table.py)."""
         if self._map is None:
-            raise RuntimeError("No cabmap loaded -- call load_cab_map()/build_cab_map() (or use_game(game) "
+            raise RuntimeError("No cabmap loaded -- call load_cab_map()/build_cab_map() (or use_session(key) "
                                "to select a loaded game's map) first.")
         # Imported here, not at module scope: row_table needs numpy, and this
         # module has to stay importable (for claim_runtime_early) before the
@@ -600,7 +613,7 @@ class RipperBridge:
         ``sort_direction`` is 0 = load order, 1 = ascending, 2 = descending. Returns the
         visible row ids as a numpy int32 array, already sorted."""
         if self._map is None:
-            raise RuntimeError("No cabmap loaded -- call load_cab_map()/build_cab_map() (or use_game(game) "
+            raise RuntimeError("No cabmap loaded -- call load_cab_map()/build_cab_map() (or use_session(key) "
                                "to select a loaded game's map) first.")
         import numpy as np
         payload = self._bridge.SearchTable(self._map, query or "", _flat_rules(rules),
@@ -611,7 +624,7 @@ class RipperBridge:
         """Sort an explicit row-id subset (the folder view's listing) by a display column --
         same engine, encoding and direction semantics as search_table."""
         if self._map is None:
-            raise RuntimeError("No cabmap loaded -- call load_cab_map()/build_cab_map() (or use_game(game) "
+            raise RuntimeError("No cabmap loaded -- call load_cab_map()/build_cab_map() (or use_session(key) "
                                "to select a loaded game's map) first.")
         import numpy as np
         payload = self._bridge.SortRows(self._map, _int_array(row_ids),
@@ -624,7 +637,7 @@ class RipperBridge:
         match are silently skipped -- compare len(input) to len(result) to
         check coverage. Requires a loaded cabmap."""
         if self._map is None:
-            raise RuntimeError("No cabmap loaded -- call load_cab_map()/build_cab_map() (or use_game(game) "
+            raise RuntimeError("No cabmap loaded -- call load_cab_map()/build_cab_map() (or use_session(key) "
                                "to select a loaded game's map) first.")
         return [str(c) for c in self._bridge.ResolveCabsForPaths(self._map, _string_array(container_paths))]
 
@@ -637,7 +650,7 @@ class RipperBridge:
         include an AnimationClip" without resolving/exporting anything.
         Requires a loaded cabmap."""
         if self._map is None:
-            raise RuntimeError("No cabmap loaded -- call load_cab_map()/build_cab_map() (or use_game(game) "
+            raise RuntimeError("No cabmap loaded -- call load_cab_map()/build_cab_map() (or use_session(key) "
                                "to select a loaded game's map) first.")
         return [str(c) for c in self._bridge.ResolveClosureCabNames(self._map, _string_array(cab_names))]
 
@@ -654,7 +667,7 @@ class RipperBridge:
         pull in each dependent's own forward closure. Requires a loaded
         cabmap."""
         if self._map is None:
-            raise RuntimeError("No cabmap loaded -- call load_cab_map()/build_cab_map() (or use_game(game) "
+            raise RuntimeError("No cabmap loaded -- call load_cab_map()/build_cab_map() (or use_session(key) "
                                "to select a loaded game's map) first.")
         return [str(c) for c in self._bridge.FindDirectDependents(self._map, _string_array(cab_names))]
 
@@ -791,7 +804,7 @@ class RipperBridge:
         deliberately so -- a big closure has millions of reference edges, and a caller that
         only wants bytes must not pay to index topology it will never read."""
         if self._map is None:
-            raise RuntimeError("No cabmap loaded -- call load_cab_map()/build_cab_map() (or use_game(game) "
+            raise RuntimeError("No cabmap loaded -- call load_cab_map()/build_cab_map() (or use_session(key) "
                                "to select a loaded game's map) first.")
         cab_names = list(cab_names)
         formats = _string_array(_texture_formats)
@@ -816,7 +829,7 @@ class RipperBridge:
         {seed path -> exported guid}, the entire placement-to-asset join --
         no name-index scan over the closure exists on this side anymore."""
         if self._map is None:
-            raise RuntimeError("No cabmap loaded -- call load_cab_map()/build_cab_map() (or use_game(game) "
+            raise RuntimeError("No cabmap loaded -- call load_cab_map()/build_cab_map() (or use_session(key) "
                                "to select a loaded game's map) first.")
         formats = _string_array(_texture_formats)
         excluded = _string_array([str(name) for name in excluded_class_names]) \

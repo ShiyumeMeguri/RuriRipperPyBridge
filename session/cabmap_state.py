@@ -11,16 +11,16 @@ browser this one mirrors used VirtualMode plus a plain backing list. Each host's
 panel materializes only ``display_window()`` -- a capped, already-filtered
 window -- and nothing else.
 
-Per game, one session. All of that per-cabmap state (rows, folder tree,
+Per INSTALL, one session. All of that per-cabmap state (rows, folder tree,
 selection, sort, filter, the animation-build handover) lives on a GameSession,
-one per game name, so several games' cabmaps can be open at once and switched
-between without either one throwing the other away -- a CabMapHandle is a pure
-value object and the bridge holds many (see pythonnet_bridge.use_game). ``activate``
-picks the live one; the module-level session-field names (ROWS, VISIBLE,
-CURRENT_DIR, ...) are a read/write VIEW onto whichever session is active, proxied
-through __getattr__/set_select_anchor so every existing ``cabmap_state.ROWS`` reader
-sees the active game with no change. The ONE thing that is genuinely process-wide
-and shared across games is BRIDGE, the CLR session itself.
+one per install key, so several installs' cabmaps can be open at once and
+switched between without either one throwing the other away -- a CabMapHandle is
+a pure value object and the bridge holds many (see pythonnet_bridge.use_session).
+``activate`` picks the live one; the module-level session-field names (ROWS,
+VISIBLE, CURRENT_DIR, ...) are a read/write VIEW onto whichever session is active,
+proxied through __getattr__/set_select_anchor so every existing
+``cabmap_state.ROWS`` reader sees the active install with no change. The ONE thing
+that is genuinely process-wide and shared is BRIDGE, the CLR session itself.
 
 The one thing that stays with the host is the search DEBOUNCE TIMER, because
 that is a UI event loop's job (``bpy.app.timers`` / ``QTimer``); the policy
@@ -50,7 +50,7 @@ LIST_CAP = 20000
 SEARCH_DEBOUNCE_SECONDS = 0.25  # the host's own timer applies this
 
 # The CLR session, process-wide and shared by every game's cabmap (its _map is
-# switched per game by pythonnet_bridge.use_game). Not session state: a true
+# switched per install by pythonnet_bridge.use_session). Not session state: a true
 # single bridge for the whole process.
 BRIDGE = None   # pythonnet_bridge.RipperBridge | None
 
@@ -79,17 +79,25 @@ class _Node:
 
 
 class GameSession:
-    """One game's cabmap browser state. Everything here is about a SINGLE loaded
-    cabmap; a second game gets its own GameSession, and switching between them is
-    ``activate``. The field names match the module-level view names exactly, which
-    is what lets __getattr__ proxy ``cabmap_state.ROWS`` straight through to the
-    active session."""
+    """One INSTALL's cabmap browser state. Everything here is about a SINGLE loaded
+    cabmap; a second install gets its own GameSession, and switching between them
+    is ``activate``. The field names match the module-level view names exactly,
+    which is what lets __getattr__ proxy ``cabmap_state.ROWS`` straight through to
+    the active session.
 
-    __slots__ = ("game", "ROWS", "VISIBLE", "CURRENT_DIR", "CURRENT_SUBFOLDERS",
+    Two identities, deliberately apart. ``key`` is WHICH INSTALL this is -- the
+    product name the folder itself carries -- and is what every session, cabmap
+    slot and browser tab is filed under, so two installs of one title never share
+    a session. ``game`` is WHICH DECODER reads it, the upstream GameType member,
+    and is what a game-specific table (a retarget mapping, a face system) is
+    selected by. One title installed twice is two keys and one game."""
+
+    __slots__ = ("key", "game", "ROWS", "VISIBLE", "CURRENT_DIR", "CURRENT_SUBFOLDERS",
                  "SELECTED_CABS", "SELECT_ANCHOR", "ANIMATION_BUILD_STATE",
                  "_ROOT", "_ROWS_BY_CAB", "_sort_column", "_sort_dir", "_active_rules")
 
-    def __init__(self, game):
+    def __init__(self, key, game=""):
+        self.key = key
         self.game = game
         self.ROWS = []             # row_table.RowTable -- the full cabmap, set by load_rows()
         self.VISIBLE = []          # list[int] -- indices into ROWS after the current filter+sort
@@ -105,56 +113,92 @@ class GameSession:
         self._active_rules = ()       # whatever was last passed to apply_filter()'s `rules` arg
 
 
-# game name (or None for a nameless / not-yet-recognised session) -> GameSession.
+# install key (or None for the session a host uses before it has named one) -> GameSession.
 SESSIONS = {}
 # The session every module-level session-field name currently views.
 ACTIVE = None
 
 
-def session_for(game):
-    """The GameSession for ``game`` (a GameType member name, or None for the
-    nameless session a plain un-hooked Unity build browses under), created empty
-    on first use."""
-    session = SESSIONS.get(game)
+def session_for(key, game=None):
+    """The GameSession for install ``key``, created empty on first use. ``game``
+    states which decoder reads it and is remembered when given, so the two
+    identities are set in one place instead of by a second assignment a caller
+    could forget."""
+    session = SESSIONS.get(key)
     if session is None:
-        session = GameSession(game)
-        SESSIONS[game] = session
+        session = GameSession(key)
+        SESSIONS[key] = session
+    if game is not None:
+        session.game = game
     return session
 
 
-def activate(game):
-    """Make ``game``'s session the live one every ``cabmap_state.<field>`` view
-    reads. When BRIDGE already has that game's cabmap loaded, the bridge's own
-    _map/decoder is switched in lockstep (use_game), so a search or import against
-    the active session hits the right cabmap and there is no way to leave the model
-    and the bridge disagreeing about which game is current. A game with no loaded
-    map yet (session created, cabmap not built/loaded) just switches the Python
-    view."""
+def activate(key, game=None):
+    """Make install ``key``'s session the live one every ``cabmap_state.<field>``
+    view reads. When BRIDGE already has that install's cabmap loaded, the bridge's
+    own _map/decoder is switched in lockstep (use_session), so a search or import
+    against the active session hits the right cabmap and there is no way to leave
+    the model and the bridge disagreeing about which install is current. An
+    install with no loaded map yet (session created, cabmap not built/loaded) just
+    switches the Python view."""
     global ACTIVE
-    ACTIVE = session_for(game)
-    if BRIDGE is not None and game in BRIDGE.maps_by_game:
-        BRIDGE.use_game(game)
+    ACTIVE = session_for(key, game)
+    if BRIDGE is not None and key in BRIDGE.maps_by_key:
+        BRIDGE.use_session(key)
     return ACTIVE
 
 
-def drop(game):
-    """Discard ``game``'s browser session entirely -- its rows, folder tree,
+def drop(key):
+    """Discard install ``key``'s browser session entirely -- its rows, folder tree,
     selection and animation handover -- when its tab is closed. Only this one
-    game's in-memory view is released; the process-wide BRIDGE and every other
-    game's session are untouched (HOLDS_PROCESS_STATE). If it was the live one,
-    the nameless session becomes active so every module-level view still
+    install's in-memory view is released; the process-wide BRIDGE and every other
+    install's session are untouched (HOLDS_PROCESS_STATE). If it was the live one,
+    the unnamed session becomes active so every module-level view still
     resolves."""
     global ACTIVE
-    session = SESSIONS.pop(game, None)
+    session = SESSIONS.pop(key, None)
     if session is None:
         return
     if ACTIVE is session:
         ACTIVE = session_for(None)
 
 
+def rename(old_key, new_key):
+    """Refile install ``old_key``'s session -- and its cabmap slot on the bridge --
+    under ``new_key``. What a browser tab does the moment the folder it is pointed
+    at names itself: the session carries over intact, so a cabmap already loaded is
+    not re-read just because the tab learned its name."""
+    global ACTIVE
+    if old_key == new_key:
+        return
+    session = SESSIONS.pop(old_key, None)
+    if session is None:
+        return
+    session.key = new_key
+    SESSIONS[new_key] = session
+    if BRIDGE is not None:
+        BRIDGE.rename_session(old_key, new_key)
+    if ACTIVE is None:
+        ACTIVE = session
+
+
+def active_key():
+    """WHICH INSTALL the live session is, or None before one is named. The key
+    every per-install lookup (its cabmap slot, its session) is filed under."""
+    return ACTIVE.key if ACTIVE is not None else None
+
+
 def active_game():
-    """The game name the live session is for, or None for the nameless session."""
-    return ACTIVE.game if ACTIVE is not None else None
+    """WHICH DECODER the live session reads through -- the upstream GameType
+    member, "" for an install no game module claims. What a game-specific table is
+    selected by; never a session key (two installs of one title share it)."""
+    return ACTIVE.game if ACTIVE is not None else ""
+
+
+def game_of(key):
+    """The decoder game of one install's session, "" when it has none."""
+    session = SESSIONS.get(key)
+    return session.game if session is not None else ""
 
 
 # The names that are a VIEW onto ACTIVE rather than real module attributes.
@@ -174,7 +218,7 @@ def __getattr__(name):
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
-ACTIVE = session_for(None)  # a nameless default session so the module works before any game is picked
+ACTIVE = session_for(None)  # an unnamed default session so the module works before any install is picked
 
 
 def clear_selection():
@@ -375,7 +419,7 @@ def load_rows(preferred_dir=()):
     omitted). ROWS is a columnar row_table.RowTable -- indexing/iteration yield
     dict-compatible row views, so per-row consumers are unchanged while the hot
     paths (search/sort/window) run columnar. Reads the bridge's CURRENT _map, so
-    the caller selects the game first (activate / use_game).
+    the caller selects the install first (activate / use_session).
 
     ``preferred_dir`` lets a host restore the folder the user was last browsing
     instead of dumping them back at the root on every Load; a path that no
