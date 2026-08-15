@@ -722,6 +722,26 @@ class RipperBridge:
         return bytes(self._bridge.GameDataBlob(
             self._map, str(dataset_id), _named_args(args), token))
 
+    def solve_face_retarget(self, request_json, performance_bytes):
+        """Play one character's baked facial performance on another character's face.
+
+        The caller states only what it alone knows: the bones its rig has with their rest
+        transforms, and the sampled clip (``performance_bytes`` is float32
+        [frame][bone][10] -- position xyz, rotation xyzw, scale xyz -- for exactly the
+        bones the request names, in that order). Which face tables exist, which one the
+        clip was authored on, which Euler convention they are written in and which named
+        expressions the performance IS are all measured on the other side, against the
+        game's own data read straight out of this session's cabmap.
+
+        Returns ``(report, poses)``: the JSON diagnosis, and the ANSWER ALREADY COMPOSED --
+        float32 [frame][bone][10] of Unity-space local transforms for the bones the report
+        names. The caller keys those; it composes nothing and never sees a ctrl weight."""
+        if self._map is None:
+            raise RuntimeError("No cabmap loaded -- call load_cab_map()/build_cab_map() first.")
+        answer = self._bridge.SolveFaceRetarget(
+            self._map, str(request_json), _clr_byte_array(performance_bytes))
+        return str(answer.Json), bytes(answer.Poses)
+
     def scan_cabs(self, cab_names):
         """Load + process the closure, build the object graph, export NOTHING.
 
