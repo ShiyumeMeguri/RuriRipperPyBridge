@@ -97,6 +97,17 @@ GENERIC_NORMAL_HINTS = ("normal", "bump")
 GENERIC_EMISSION_HINTS = ("emission", "emissive", "glow")
 
 
+def squash(name):
+    """A property name with its punctuation and case taken out, for hint matching.
+
+    A shader author names their own properties, and the same slot is spelled
+    ``_MainTex``, ``_Main_texture``, ``_mainTexture`` or ``_MAIN_TEX`` depending on
+    who wrote it -- matching the raw string means the hint ``maintex`` finds the
+    first and silently misses the second, which is a base map that never reaches
+    Base Color. Squashing both sides makes the hint about the WORDS."""
+    return "".join(character for character in str(name).lower() if character.isalnum())
+
+
 def flatten(entries):
     """Normalize ``m_TexEnvs``/``m_Colors``/``m_Floats`` to ``{name: value}``,
     accepting either on-disk shape (see the module docstring)."""
@@ -172,8 +183,7 @@ class MaterialProperties:
             if guid:
                 return name, guid
         for key, guid in self.textures.items():
-            lower = key.lower()
-            if any(hint in lower for hint in generic_hints):
+            if any(hint in squash(key) for hint in generic_hints):
                 return key, guid
         return None, None
 
