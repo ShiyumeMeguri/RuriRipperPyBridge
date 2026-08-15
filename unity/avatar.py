@@ -72,6 +72,42 @@ def transform_paths(data):
     return list(_parse_tos(data).values())
 
 
+# WHICH of the avatar's two full-skeleton pose arrays is the rest a skinned mesh
+# was authored against. An Avatar carries both, over the same m_AvatarSkeleton
+# node order:
+#
+#   m_DefaultPose          the model's OWN pose -- the one its meshes' bindposes
+#                          invert. Measured on Endfield npc deathgirl: every one
+#                          of the face mesh's 65 bones yields the SAME residual
+#                          restWorld @ bindpose (a single rigid frame change,
+#                          |t| = 0.0082 for all 65), and so do brow (33/33),
+#                          eyeshadow (14/14), iris (8/8) and hair (31/31) -- and
+#                          all nine parts agree on that one residual to 1e-6, so
+#                          they assemble consistently.
+#   m_AvatarSkeletonPose   Unity's own skeleton pose, which is NOT that one. The
+#                          same 65 face bones yield 65 DIFFERENT residuals under
+#                          it (tongue joints off by 2.16), i.e. the face gets
+#                          re-posed into an incoherent shape -- the "stretched
+#                          face, teeth outside the skin" an assembled npc showed.
+#
+# A bone the two poses genuinely disagree about is a real rest-pose difference
+# (this rig's arms are 48 degrees apart between the outfit's bind pose and the
+# skeleton's), and skinning handles that correctly by construction; what a wrong
+# array costs is COHERENCE, which is what the numbers above measure.
+_SKELETON_POSE_FIELD = "m_DefaultPose"
+
+
+def _skeleton_and_pose(data):
+    """``(nodes, crc32 ids, per-node local TRS)`` of the avatar's full skeleton --
+    the one place either reader below decides what an avatar's rest IS."""
+    constant = _unwrap(data.get("m_Avatar") or {})
+    skeleton = _unwrap(constant.get("m_AvatarSkeleton") or {})
+    pose = _unwrap(constant.get(_SKELETON_POSE_FIELD) or {})
+    return (skeleton.get("m_Node") or [],
+            [value & 0xFFFFFFFF for value in _int_array(skeleton.get("m_ID") or [])],
+            pose.get("m_X") or [])
+
+
 def _trs_matrix(np, x):
     """Local TRS entry {t, q, s} -> 4x4 (Unity space), scale before rotation."""
     if not isinstance(x, dict):
@@ -98,21 +134,16 @@ def _trs_matrix(np, x):
 def skeleton_world_rests(data):
     """``{crc32(path): Unity world rest 4x4}`` for the avatar's FULL skeleton.
 
-    The real STANDING rest a shared-skeleton part mesh is bind-baked against
-    lives in ``m_AvatarSkeleton`` (the whole transform tree, parent links +
-    CRC32-of-path ids) posed by ``m_AvatarSkeletonPose`` (per-node local TRS) --
-    NOT ``m_Human.m_Skeleton`` (the 24-bone humanoid subset, normalised to a
+    The rest a shared-skeleton part mesh is bind-baked against lives in
+    ``m_AvatarSkeleton`` (the whole transform tree, parent links + CRC32-of-path
+    ids) posed by the array ``_SKELETON_POSE_FIELD`` names (per-node local TRS)
+    -- NOT ``m_Human.m_Skeleton`` (the 24-bone humanoid subset, normalised to a
     different, near-origin frame). World matrices are numpy 4x4 in Unity space, so
     ``skinning.bake_bind_pose`` and ``coordinate.convert_matrix`` both consume them
     directly. Empty when the avatar carries no full skeleton pose."""
     import numpy as np
 
-    constant = _unwrap(data.get("m_Avatar") or {})
-    skeleton = _unwrap(constant.get("m_AvatarSkeleton") or {})
-    nodes = skeleton.get("m_Node") or []
-    ids = [v & 0xFFFFFFFF for v in _int_array(skeleton.get("m_ID") or [])]
-    pose = _unwrap(constant.get("m_AvatarSkeletonPose") or {})
-    locals_ = pose.get("m_X") or []
+    nodes, ids, locals_ = _skeleton_and_pose(data)
     if not nodes or not locals_:
         return {}
 
@@ -134,17 +165,13 @@ def skeleton_world_rests(data):
 def skeleton_nodes(data):
     """The avatar's full embedded skeleton -- one entry per raw node in m_ParentId's index
     space: ``(name, parent_index, (tx,ty,tz), (qw,qx,qy,qz), path)``. Sourced from
-    ``m_AvatarSkeleton`` + ``m_AvatarSkeletonPose`` (the whole transform tree, present for
-    humanoid and generic avatars alike -- m_Human.m_Skeleton is only the normalised 24-bone
-    humanoid subset, see skeleton_world_rests). Names resolve through TOS path leaves, falling
-    back to ``bone_{i}`` when TOS misses the node."""
-    constant = _unwrap(data["m_Avatar"])
-    skeleton = _unwrap(constant.get("m_AvatarSkeleton") or {})
-    nodes = skeleton.get("m_Node") or []
-    skel_ids = [v & 0xFFFFFFFF for v in _int_array(skeleton.get("m_ID") or [])]
+    ``m_AvatarSkeleton`` + the pose array ``_SKELETON_POSE_FIELD`` names (the whole transform
+    tree, present for humanoid and generic avatars alike -- m_Human.m_Skeleton is only the
+    normalised 24-bone humanoid subset, see skeleton_world_rests). An armature built from
+    this therefore rests exactly where the meshes that skin to it were bound. Names resolve
+    through TOS path leaves, falling back to ``bone_{i}`` when TOS misses the node."""
     tos = _parse_tos(data)
-    pose = _unwrap(constant.get("m_AvatarSkeletonPose") or {})
-    rest = pose.get("m_X") or []
+    nodes, skel_ids, rest = _skeleton_and_pose(data)
 
     result = []
     for index in range(len(nodes)):
