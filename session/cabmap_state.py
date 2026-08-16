@@ -371,19 +371,16 @@ def set_animation_build_state(db, arm_name, maps, path_to_meshobjects):
     }
 
 
-def set_animation_discovery_state(seed_cabs, options):
-    """Only a cheap CAB-level clip discovery has happened -- no import_cabs
-    call yet, no db, nothing built into the scene. arm_name/maps/
-    path_to_meshobjects/db stay unset until mark_animation_build_done runs
-    the lazy full import (which resolves the seed closure for the first
-    time). seed_cabs is a LIST -- discovery runs over the whole multi-
-    selection, and the lazy build must co-seed every one of them or clips
-    discovered from the extra rows would never resolve in clips_by_cab."""
+def set_animation_discovery_state(seed_cabs, options, carry=None):
+    """A cheap CAB-level clip discovery happened -- db stays None until the seeds are
+    actually exported. ``carry`` is a previous build state whose armature the CALLER
+    verified is still alive: the character it built survives discovery instead of being
+    forgotten and rebuilt on the next import."""
     ACTIVE.ANIMATION_BUILD_STATE = {
         "db": None,
-        "arm_name": None,
-        "maps": None,
-        "path_to_meshobjects": None,
+        "arm_name": carry["arm_name"] if carry else None,
+        "maps": carry["maps"] if carry else None,
+        "path_to_meshobjects": carry["path_to_meshobjects"] if carry else None,
         "seed_cabs": list(seed_cabs),
         "options": options,
     }
@@ -668,11 +665,14 @@ def apply_filter(query, rules=()):
     rules = tuple(rules)
     ACTIVE._active_rules = rules
     ACTIVE.CURRENT_SUBFOLDERS = []
-    if BRIDGE is None:
+    rows = ACTIVE.ROWS
+    if BRIDGE is None or rows is None or len(rows) == 0:
         ACTIVE.VISIBLE = []
         return
-    ACTIVE.VISIBLE = BRIDGE.search_table((query or "").strip(), rules,
-                                         ACTIVE._sort_column, ACTIVE._sort_dir).tolist()
+    ACTIVE.VISIBLE = [index for index in
+                      BRIDGE.search_table((query or "").strip(), rules,
+                                          ACTIVE._sort_column, ACTIVE._sort_dir).tolist()
+                      if index < len(rows)]
 
 
 def reapply_filter(query):
