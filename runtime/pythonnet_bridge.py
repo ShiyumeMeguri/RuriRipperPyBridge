@@ -382,37 +382,40 @@ def list_decoders():
 
 def read_install(game_root):
     """What the Unity players under ``game_root`` say they are:
-    ``[{"data_folder", "company", "product", "engine_version", "is_project"}, ...]``.
+    ``[{"data_folder", "company", "product", "game_version", "engine_version",
+    "is_project"}, ...]``.
 
     Two small files per player and nothing else -- app.info for the names the build
-    publishes, globalgamemanagers for the Unity version its serialized header states.
-    ``engine_version`` is "" for a build whose engine assets are not plain (only its
-    own decoder can read those), which is a fact about the install, not an error.
-    ``is_project`` marks the ONE player the install IS -- an install routinely ships
-    several (a game, its VR build, its studio).
+    publishes, globalgamemanagers for its own bundleVersion and the Unity version its
+    serialized header states. Either version is "" when the build states none, which
+    is a fact about the install and not an error. ``is_project`` marks the ONE player
+    the install IS -- an install routinely ships several (a game, its VR build, its
+    studio).
 
     Needs only the runtime: this answers "which game is this folder" before anything
     is loaded and without any decoder active."""
     _ensure_runtime()
     flat = [str(value) for value in _bridge_type.ReadInstall(str(game_root or ""))]
     players = []
-    for i in range(0, len(flat) - 4, 5):
+    for i in range(0, len(flat) - 5, 6):
         players.append({
             "data_folder": flat[i],
             "company": flat[i + 1],
             "product": flat[i + 2],
-            "engine_version": flat[i + 3],
-            "is_project": flat[i + 4] == "1",
+            "game_version": flat[i + 3],
+            "engine_version": flat[i + 4],
+            "is_project": flat[i + 5] == "1",
         })
     return players
 
 
-def resolve_decoder(product, engine_version):
-    """The decoder id an install of this product and engine version reads through,
-    or "" when none applies (a plain Unity build needs no decoder). The rule lives
-    in the kernel (HookCatalog.Resolve) so every host resolves alike."""
+def resolve_decoder(product, game_version, engine_version):
+    """The decoder id this install reads through, or "" when none applies (a plain
+    Unity build needs no decoder). The rule lives in the kernel (HookCatalog.Resolve)
+    so every host resolves alike."""
     _ensure_runtime()
-    return str(_bridge_type.ResolveDecoder(str(product or ""), str(engine_version or "")))
+    return str(_bridge_type.ResolveDecoder(
+        str(product or ""), str(game_version or ""), str(engine_version or "")))
 
 
 def _string_array(strings):
