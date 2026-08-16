@@ -363,24 +363,56 @@ def _ensure_runtime():
     _bridge_type = _StaticTypeProxy(bridge_type)
 
 
-def list_available_hooks():
-    """Every hook id (e.g. "EndField_1.3.3") compiled into the loaded Ruri.RipperHook.dll, straight
-    from RipperBlenderBridge.ListAvailableHooks() -- no RipperBridge session (Initialize with chosen
-    hook ids) required first, since this only boots the CLR runtime and loads the DLL, then reflects
-    over its already-loaded hook types. This is what a host's Hook picker populates its
-    list from instead of a hardcoded/free-text id."""
+def list_decoders():
+    """Every game decoder compiled into the loaded Ruri.RipperHook.dll, as
+    ``[(product, version, engine_version), ...]`` -- product then version, newest
+    version first within a product.
+
+    A decoder's ``product`` IS the Unity productName of the builds it reads and its
+    id is ``product_version``, so a host joins an install to a decoder by string
+    equality and never carries a mapping table. Host FEATURES are not in this list:
+    they are the host's own compile-time fact (RipperBlenderBridge.HostFeatures),
+    not something a user picks to make a game readable.
+
+    Needs only the runtime -- no session, no cabmap."""
     _ensure_runtime()
-    return [str(h) for h in _bridge_type.ListAvailableHooks()]
+    flat = [str(value) for value in _bridge_type.ListDecoders()]
+    return [tuple(flat[i:i + 3]) for i in range(0, len(flat) - 2, 3)]
 
 
-def list_game_hooks():
-    """The hook ids that are about ONE GAME rather than a host-wide feature --
-    RipperBlenderBridge.ListGameHooks(). Those are mutually exclusive upstream, so
-    a host's picker asks WHICH ids that covers instead of guessing from the shape
-    of an id (there is a naming convention, but it belongs to the enum that
-    declares it, not to every host that reads a list)."""
+def read_install(game_root):
+    """What the Unity players under ``game_root`` say they are:
+    ``[{"data_folder", "company", "product", "engine_version", "is_project"}, ...]``.
+
+    Two small files per player and nothing else -- app.info for the names the build
+    publishes, globalgamemanagers for the Unity version its serialized header states.
+    ``engine_version`` is "" for a build whose engine assets are not plain (only its
+    own decoder can read those), which is a fact about the install, not an error.
+    ``is_project`` marks the ONE player the install IS -- an install routinely ships
+    several (a game, its VR build, its studio).
+
+    Needs only the runtime: this answers "which game is this folder" before anything
+    is loaded and without any decoder active."""
     _ensure_runtime()
-    return [str(h) for h in _bridge_type.ListGameHooks()]
+    flat = [str(value) for value in _bridge_type.ReadInstall(str(game_root or ""))]
+    players = []
+    for i in range(0, len(flat) - 4, 5):
+        players.append({
+            "data_folder": flat[i],
+            "company": flat[i + 1],
+            "product": flat[i + 2],
+            "engine_version": flat[i + 3],
+            "is_project": flat[i + 4] == "1",
+        })
+    return players
+
+
+def resolve_decoder(product, engine_version):
+    """The decoder id an install of this product and engine version reads through,
+    or "" when none applies (a plain Unity build needs no decoder). The rule lives
+    in the kernel (HookCatalog.Resolve) so every host resolves alike."""
+    _ensure_runtime()
+    return str(_bridge_type.ResolveDecoder(str(product or ""), str(engine_version or "")))
 
 
 def _string_array(strings):
@@ -456,17 +488,20 @@ def _named_args(args):
 
 
 class RipperBridge:
-    """One bridge session: Initialize once with the target game's hook id(s),
+    """One bridge session: Initialize once with the target install's decoder id,
     then Build/Load a cabmap, browse rows, and pull a selection into memory.
     Call from one thread at a time -- the underlying C# side is written for a
     single active session per the CLI's own model (see RipperBlenderBridge's
-    doc comments on GameFileLoader/GameBundleHook static state)."""
+    doc comments on GameFileLoader/GameBundleHook static state).
 
-    def __init__(self, hook_ids, game_root):
+    ONE decoder, never a set: the process reads one game at a time, and which
+    features run is the host's own declaration on the other side of the bridge."""
+
+    def __init__(self, decoder_id, game_root):
         _ensure_runtime()
         self._bridge = _bridge_type
-        self._bridge.Initialize(_string_array(hook_ids), str(game_root or ""))
-        self._hook_ids = tuple(hook_ids)
+        self._bridge.Initialize(str(decoder_id or ""), str(game_root or ""))
+        self._decoder_id = str(decoder_id or "")
         self._game_root = str(game_root or "")
         # install key -> the folder that install's datasets read, captured when its
         # cabmap loaded. use_session re-opens the session on it, so a dataset never
@@ -475,16 +510,13 @@ class RipperBridge:
         self._map = None
         # Per-INSTALL cabmap slots, keyed by whatever identity the host files an
         # install under (see cabmap_state.GameSession.key). maps_by_key is that key
-        # -> loaded map handle; _hooks_by_key is that key -> the game-hook id(s)
-        # active when that map loaded (its own decoder, kept apart from the AR_*
-        # feature hooks a switch preserves). use_session(key) flips self._map
-        # between them and, when the decoder differs, reinitializes onto it.
-        # Several installs can be loaded at once (a CabMapHandle is a pure value
-        # object, safe to hold many of); only one decoder is ever active, which is
-        # what use_session switches.
+        # -> loaded map handle; _decoder_by_key is that key -> the decoder id that
+        # read it. use_session(key) flips self._map between them and, when the
+        # decoder differs, reinitializes onto it. Several installs can be loaded at
+        # once (a CabMapHandle is a pure value object, safe to hold many of); only
+        # one decoder is ever active, which is what use_session switches.
         self.maps_by_key = {}
-        self._hooks_by_key = {}
-        self._all_game_hooks = None
+        self._decoder_by_key = {}
         # {clip guid -> (meta_json, payload_bytes)} from the LAST import_cabs
         # call -- the zero-parse curve fast path (see ClipCurveBlob.cs).
         self.clip_curves_by_guid = {}
@@ -503,9 +535,9 @@ class RipperBridge:
         self.seed_asset_guids_by_path = {}
 
     @property
-    def hook_ids(self):
-        """The hook id set this session was last (re)Initialize()d with -- see reinitialize()."""
-        return self._hook_ids
+    def decoder_id(self):
+        """The decoder this session was last (re)Initialize()d with -- see reinitialize()."""
+        return self._decoder_id
 
     @property
     def game_root(self):
@@ -514,18 +546,17 @@ class RipperBridge:
         above this line ever spells an install layout."""
         return self._game_root
 
-    def reinitialize(self, hook_ids, game_root=None):
-        """Re-apply a (possibly different) hook selection onto this SAME session, preserving
+    def reinitialize(self, decoder_id, game_root=None):
+        """Re-apply a (possibly different) decoder onto this SAME session, preserving
         self._map/clip_curves_by_guid -- unlike constructing a fresh RipperBridge, this does not
         drop an already-loaded cabmap. Safe/idempotent on the C# side (RipperBlenderBridge.
-        Initialize -> RuriHook.ApplyHooks diffs the desired hook id set against the currently
-        active one and only enables/disables the delta -- see its doc comment "safe to call more
-        than once per process"), so this is cheap even when hook_ids is unchanged. Callers should
-        still skip the call when hook_ids == self.hook_ids to avoid the log spam ApplyHooks prints
-        per hook transition."""
+        Initialize -> RuriHook.ApplyHooks diffs the desired hook set against the currently
+        active one and only enables/disables the delta), so this is cheap even when the decoder
+        is unchanged. Callers should still skip the call when it is, to avoid the log spam
+        ApplyHooks prints per hook transition."""
         root = self._game_root if game_root is None else str(game_root or "")
-        self._bridge.Initialize(_string_array(hook_ids), root)
-        self._hook_ids = tuple(hook_ids)
+        self._bridge.Initialize(str(decoder_id or ""), root)
+        self._decoder_id = str(decoder_id or "")
         self._game_root = root
 
     @property
@@ -536,28 +567,17 @@ class RipperBridge:
         """Scan game_root and write a fresh cabmap to out_path. Returns 0 on success."""
         return int(self._bridge.BuildCabMap(game_root, out_path))
 
-    def _game_hook_id_set(self):
-        """Every hook id the DLL classes as being about ONE GAME (ListGameHooks),
-        cached -- the set use_session splits an install's own decoder hooks out of the
-        AR_* feature hooks by."""
-        if self._all_game_hooks is None:
-            self._all_game_hooks = frozenset(str(h) for h in self._bridge.ListGameHooks())
-        return self._all_game_hooks
-
     def load_cab_map(self, cab_map_path, key=None):
         """Load an existing cabmap file; must be called (or build_cab_map) before
         enumerate_rows()/import_cabs(). key=None just points the current _map at it
         (the single-install path, unchanged). Passing an install key ALSO registers
-        the map in this session's per-install slot, capturing whichever game-hook(s)
-        are active now as that install's own decoder, so use_session(key) can switch
-        back to it later without reloading -- load each install's cabmap while its
-        hook is the ticked one, exactly as the panel does."""
+        the map in this session's per-install slot, capturing the decoder that read
+        it, so use_session(key) can switch back to it later without reloading."""
         handle = self._bridge.LoadCabMap(cab_map_path)
         self._map = handle
         if key is not None:
             self.maps_by_key[key] = handle
-            game_hooks = self._game_hook_id_set()
-            self._hooks_by_key[key] = tuple(h for h in self._hook_ids if h in game_hooks)
+            self._decoder_by_key[key] = self._decoder_id
             self._roots_by_key[key] = self._game_root
 
     def rename_session(self, old_key, new_key):
@@ -566,31 +586,26 @@ class RipperBridge:
         install that only just learned its own name keeps the map it paid for."""
         if old_key == new_key:
             return
-        for slot in (self.maps_by_key, self._hooks_by_key, self._roots_by_key):
+        for slot in (self.maps_by_key, self._decoder_by_key, self._roots_by_key):
             if old_key in slot:
                 slot[new_key] = slot.pop(old_key)
 
     def use_session(self, key):
         """Select a previously loaded install's cabmap (load_cab_map(path, key=...))
         as the active _map and, when that install's decoder differs from what is
-        active, reinitialize onto it: the target's own game-hook(s) PLUS every
-        non-game hook currently ticked (the AR_* features stay; one game's decoder
-        replaces another's, matching the upstream's mutually-exclusive game hooks).
-        No-op on the hook side when the target's decoder is already active, so
-        repeated selects of the same install are cheap. enumerate_table/search only
-        need the _map switch; import/game_data go through the freshly selected
-        decoder."""
+        active, reinitialize onto it -- one game's decoder replaces another's,
+        matching the upstream's one-decoder-at-a-time rule. No-op on the hook side
+        when the target's decoder is already active, so repeated selects of the same
+        install are cheap. enumerate_table/search only need the _map switch;
+        import/game_data go through the freshly selected decoder."""
         if key not in self.maps_by_key:
             raise RuntimeError(
                 f"No cabmap loaded for install {key!r} -- call load_cab_map(path, key={key!r}) first.")
         self._map = self.maps_by_key[key]
-        game_hooks = self._game_hook_id_set()
-        target = self._hooks_by_key.get(key, ())
-        non_game = [h for h in self._hook_ids if h not in game_hooks]
-        desired = list(target) + [h for h in non_game if h not in target]
+        decoder = self._decoder_by_key.get(key, self._decoder_id)
         root = self._roots_by_key.get(key, self._game_root)
-        if set(desired) != set(self._hook_ids) or root != self._game_root:
-            self.reinitialize(desired, root)
+        if decoder != self._decoder_id or root != self._game_root:
+            self.reinitialize(decoder, root)
 
     def enumerate_table(self):
         """The row set as a columnar row_table.RowTable -- raw blob/offset

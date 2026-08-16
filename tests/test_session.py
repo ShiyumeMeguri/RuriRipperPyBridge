@@ -86,19 +86,19 @@ class TestSessionIsolation(unittest.TestCase):
 
     def test_decoder_game_is_apart_from_the_install_key(self):
         # Two installs of one title: distinct sessions, one game.
-        cabmap_state.activate("__test_ef__", "EndField")
-        self.assertEqual(cabmap_state.active_game(), "EndField")
-        cabmap_state.activate("__test_kk__", "EndField")
+        cabmap_state.activate("__test_ef__", "Endfield")
+        self.assertEqual(cabmap_state.active_game(), "Endfield")
+        cabmap_state.activate("__test_kk__", "Endfield")
         self.assertEqual(cabmap_state.active_key(), "__test_kk__")
-        self.assertEqual(cabmap_state.active_game(), "EndField")
-        self.assertEqual(cabmap_state.game_of("__test_ef__"), "EndField")
+        self.assertEqual(cabmap_state.active_game(), "Endfield")
+        self.assertEqual(cabmap_state.game_of("__test_ef__"), "Endfield")
 
     def test_rename_carries_the_session_over(self):
-        cabmap_state.activate("__test_ef__", "EndField")
+        cabmap_state.activate("__test_ef__", "Endfield")
         _load_into_active(_EF_ROWS)
         cabmap_state.rename("__test_ef__", "__test_kk__")
         self.assertEqual(cabmap_state.active_key(), "__test_kk__")
-        self.assertEqual(cabmap_state.active_game(), "EndField")
+        self.assertEqual(cabmap_state.active_game(), "Endfield")
         self.assertEqual(len(cabmap_state.ROWS), 3)
         self.assertNotIn("__test_ef__", cabmap_state.SESSIONS)
 

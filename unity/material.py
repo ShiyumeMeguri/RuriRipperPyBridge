@@ -1,7 +1,7 @@
 """Reading a Unity ``Material`` document.
 
 Only the READING is shared. What a host does with the result -- wire a
-Principled BSDF graph, or fill an EndField_Uber uniform table -- is entirely
+Principled BSDF graph, or fill an Endfield_Uber uniform table -- is entirely
 its own business and stays on its own side. What is not its own business is
 how Unity spells its property tables, which has changed across versions and
 across writers, and which both importers previously got subtly differently:

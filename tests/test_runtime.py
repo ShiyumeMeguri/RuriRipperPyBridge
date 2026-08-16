@@ -53,7 +53,7 @@ class TestWorkspace(unittest.TestCase):
 
 DEFAULTS = {
     "ripperhook_bin": "",
-    "hook_ids": [],
+    "decoder_id": "",
     "lod0_only": True,
     "texture_resolution": 2048,
     "settings_version": 3,
@@ -75,14 +75,14 @@ class TestJsonSettings(unittest.TestCase):
     def test_missing_file_yields_defaults(self):
         store = self._store()
         self.assertEqual(store.get("texture_resolution"), 2048)
-        self.assertEqual(store.get("hook_ids"), [])
+        self.assertEqual(store.get("decoder_id"), "")
 
     def test_round_trip_creates_the_directory(self):
         store = self._store()
-        self.assertTrue(store.set_many(ripperhook_bin="D:/bin", hook_ids=["EndField_1.3.3"]))
+        self.assertTrue(store.set_many(ripperhook_bin="D:/bin", decoder_id="Endfield_1.4.4"))
         self.assertTrue(os.path.isfile(self.path))
         self.assertEqual(self._store().get("ripperhook_bin"), "D:/bin")
-        self.assertEqual(self._store().get("hook_ids"), ["EndField_1.3.3"])
+        self.assertEqual(self._store().get("decoder_id"), "Endfield_1.4.4")
 
     def test_unchanged_write_is_skipped(self):
         store = self._store()
@@ -104,11 +104,11 @@ class TestJsonSettings(unittest.TestCase):
         os.makedirs(os.path.dirname(self.path), exist_ok=True)
         with open(self.path, "w", encoding="utf-8") as handle:
             json.dump({"settings_version": 1, "ripperhook_bin": "D:/typed/by/hand",
-                       "hook_ids": ["EndField_1.3.3"], "lod0_only": False,
+                       "decoder_id": "Endfield_1.4.4", "lod0_only": False,
                        "texture_resolution": 512}, handle)
         store = self._store()
         self.assertEqual(store.get("ripperhook_bin"), "D:/typed/by/hand")  # user input kept
-        self.assertEqual(store.get("hook_ids"), ["EndField_1.3.3"])        # user input kept
+        self.assertEqual(store.get("decoder_id"), "Endfield_1.4.4")        # user input kept
         self.assertTrue(store.get("lod0_only"))                            # reset
         self.assertEqual(store.get("texture_resolution"), 2048)            # reset
         self.assertEqual(store.get("settings_version"), 3)
