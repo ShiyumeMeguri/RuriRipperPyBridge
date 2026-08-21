@@ -308,16 +308,20 @@ class MeshLoad:
     for that one, which is genuinely about Unity's storage formats)."""
 
     __slots__ = ("decoded", "document", "problem", "detail", "name",
-                 "dropped_topologies")
+                 "dropped_topologies", "variable_bone_count_weights")
 
     def __init__(self, decoded=None, document=None, problem=None, detail="",
-                 name="", dropped_topologies=()):
+                 name="", dropped_topologies=(), variable_bone_count_weights=0):
         self.decoded = decoded
         self.document = document
         self.problem = problem      # None | no_ref | not_found | no_mesh_document | empty
         self.detail = detail        # guid, or the empty-mesh diagnosis
         self.name = name            # the Mesh asset's own m_Name
         self.dropped_topologies = tuple(dropped_topologies)
+        # Words of m_VariableBoneCountWeights this mesh carries. Non-zero means
+        # the skin has influences past the fixed four that no decode path here
+        # reads, so the vertex groups built from it are a truncation.
+        self.variable_bone_count_weights = int(variable_bone_count_weights)
 
     @property
     def ok(self):
@@ -344,7 +348,8 @@ def load_mesh(db, mesh_ref, fallback_name=""):
             return MeshLoad(problem="empty", name=name,
                             detail="'{0}' decoded to zero vertices.".format(name))
         dropped = sorted({sm.topology for sm in decoded.submeshes} - {0})
-        return MeshLoad(decoded=decoded, name=name, dropped_topologies=dropped)
+        return MeshLoad(decoded=decoded, name=name, dropped_topologies=dropped,
+                        variable_bone_count_weights=decoded.variable_bone_count_weights)
 
     mesh_file = db.load_guid(guid)
     if mesh_file is None:
@@ -363,4 +368,5 @@ def load_mesh(db, mesh_ref, fallback_name=""):
     dropped = sorted({int(sm.get("topology") or 0)
                       for sm in (mesh_doc.data.get("m_SubMeshes") or [])} - {0})
     return MeshLoad(decoded=decoded, document=mesh_doc, name=name,
-                    dropped_topologies=dropped)
+                    dropped_topologies=dropped,
+                    variable_bone_count_weights=decoded.variable_bone_count_weights)

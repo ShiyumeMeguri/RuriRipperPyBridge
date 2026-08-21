@@ -152,6 +152,12 @@ class DecodedMesh:
         self.bone_name_hashes = None # (b,) uint32
         self.blendshapes = []        # list of dicts: name, frames[...]
         self.vertex_count = 0
+        # Length of m_VariableBoneCountWeights. Unity parks influences past the
+        # fixed four in it, in a packing nothing here decodes, so the honest
+        # report is "this many words exist and are not represented" rather than
+        # a four-influence skin presented as complete. Zero on every mesh
+        # measured so far, which is why the fixed-four read is otherwise whole.
+        self.variable_bone_count_weights = 0
 
 
 def _decode_channel(blob, stream_offsets, stream_strides, channel, count):
@@ -354,8 +360,21 @@ def decode_mesh(doc):
 
     _apply_legacy_skin(mesh, data.get("m_Skin"))
 
+    mesh.variable_bone_count_weights = _variable_bone_count_weights(
+        data.get("m_VariableBoneCountWeights"))
+
     mesh.blendshapes = _decode_blendshapes(data.get("m_Shapes") or {})
     return mesh
+
+
+def _variable_bone_count_weights(field):
+    """How many words m_VariableBoneCountWeights holds. The field is a container
+    whose m_Data is null on a mesh that skins within the fixed four influences,
+    which is every mesh measured so far."""
+    if not isinstance(field, dict):
+        return 0
+    payload = field.get("m_Data")
+    return len(payload) if isinstance(payload, (list, str)) else 0
 
 
 def _apply_legacy_skin(mesh, skin):
@@ -437,6 +456,8 @@ def decode_mesh_blob(meta_json, payload):
         mesh.bone_weights = skin[:, :4].copy().view(np.float32)
         mesh.bone_indices = skin[:, 4:].copy().view(np.int32)
 
+    mesh.variable_bone_count_weights = int(meta.get("variableBoneCountWeights") or 0)
+
     mesh.blendshapes = _decode_blendshapes_blob(meta, section("shapeVertices"))
     return mesh
 
@@ -506,14 +527,16 @@ def _decode_uint_hex(hexstr):
 
 def _decode_blendshapes_blob(meta, vertex_bytes):
     """Blob-side blendshape decode -- same output structure as _decode_blendshapes
-    (name, per-frame weight/has_normals and (index, vertex delta, normal delta)
-    tuples), read straight off the packed 28-byte entries instead of YAML dicts."""
+    (name, per-frame weight/has_normals/has_tangents and (index, vertex delta,
+    normal delta, tangent delta) tuples), read straight off the packed 40-byte
+    entries instead of YAML dicts."""
     channels = meta.get("shapeChannels") or []
     if not channels:
         return []
     frames_meta = meta.get("shapeFrames") or []
     full_weights = meta.get("fullWeights") or []
-    entry_dtype = np.dtype([("index", "<u4"), ("v", "<f4", (3,)), ("n", "<f4", (3,))])
+    entry_dtype = np.dtype([("index", "<u4"), ("v", "<f4", (3,)),
+                            ("n", "<f4", (3,)), ("t", "<f4", (3,))])
     entries = np.frombuffer(vertex_bytes, dtype=entry_dtype) if len(vertex_bytes) else \
         np.empty(0, dtype=entry_dtype)
 
@@ -521,7 +544,8 @@ def _decode_blendshapes_blob(meta, vertex_bytes):
         rows = entries[first:first + vcount]
         return [(int(row["index"]),
                  (float(row["v"][0]), float(row["v"][1]), float(row["v"][2])),
-                 (float(row["n"][0]), float(row["n"][1]), float(row["n"][2])))
+                 (float(row["n"][0]), float(row["n"][1]), float(row["n"][2])),
+                 (float(row["t"][0]), float(row["t"][1]), float(row["t"][2])))
                 for row in rows]
 
     result = []
@@ -538,6 +562,7 @@ def _decode_blendshapes_blob(meta, vertex_bytes):
                 "weight": weight,
                 "deltas": frame_deltas(int(fr.get("firstVertex") or 0), int(fr.get("vertexCount") or 0)),
                 "has_normals": bool(fr.get("hasNormals", 0)),
+                "has_tangents": bool(fr.get("hasTangents", 0)),
             })
         result.append({"name": name, "frames": chan_frames})
     return result
@@ -558,10 +583,12 @@ def _decode_blendshapes(shapes):
         for v in verts[first:first + vcount]:
             vtx = v.get("vertex") or {}
             nrm = v.get("normal") or {}
+            tan = v.get("tangent") or {}
             out.append((
                 v.get("index", 0),
                 (vtx.get("x", 0.0), vtx.get("y", 0.0), vtx.get("z", 0.0)),
                 (nrm.get("x", 0.0), nrm.get("y", 0.0), nrm.get("z", 0.0)),
+                (tan.get("x", 0.0), tan.get("y", 0.0), tan.get("z", 0.0)),
             ))
         return out
 
@@ -582,6 +609,7 @@ def _decode_blendshapes(shapes):
                 "weight": weight,
                 "deltas": frame_deltas(fr.get("firstVertex", 0), fr.get("vertexCount", 0)),
                 "has_normals": bool(fr.get("hasNormals", 0)),
+                "has_tangents": bool(fr.get("hasTangents", 0)),
             })
         result.append({"name": name, "frames": chan_frames})
     return result
