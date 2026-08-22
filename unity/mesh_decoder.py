@@ -152,11 +152,13 @@ class DecodedMesh:
         self.bone_name_hashes = None # (b,) uint32
         self.blendshapes = []        # list of dicts: name, frames[...]
         self.vertex_count = 0
-        # Length of m_VariableBoneCountWeights. Unity parks influences past the
-        # fixed four in it, in a packing nothing here decodes, so the honest
-        # report is "this many words exist and are not represented" rather than
-        # a four-influence skin presented as complete. Zero on every mesh
-        # measured so far, which is why the fixed-four read is otherwise whole.
+        # Length of m_VariableBoneCountWeights. The influence count is NOT capped
+        # at four anywhere above: bone_weights/bone_indices keep whatever width
+        # the BlendWeight/BlendIndices channels declare, and the host builds one
+        # vertex group entry per influence. This field is Unity's OTHER place to
+        # park influences, in a packing whose byte layout nothing in this tree
+        # derives, so its length travels as a fact to report rather than a skin
+        # silently presented as complete. Zero on every mesh measured so far.
         self.variable_bone_count_weights = 0
 
 
