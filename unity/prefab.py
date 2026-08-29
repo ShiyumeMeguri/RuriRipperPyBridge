@@ -35,8 +35,13 @@ from . import mesh_decoder
 # Unity ShadowCastingMode.ShadowsOnly.
 SHADOWS_ONLY = 3
 
+# Which detail level to build. 0 is the highest the game authored; EVERY_LEVEL
+# builds all of them, which is what a caller inspecting a model wants and what
+# a caller rendering one never does.
+EVERY_LEVEL = -1
+
 DEFAULT_FILTERS = {
-    "lod0_only": True,
+    "detail_level": 0,
     "import_shadow_proxies": False,
     "import_inactive": True,
 }
@@ -87,25 +92,38 @@ class RendererInfo:
         return "<RendererInfo {0} {1} &{2}>".format(self.kind, self.name, self.file_id)
 
 
-def lod_discard_set(prefab):
-    """Renderer fileIDs that belong to LOD1+ only, i.e. the ones to discard.
+def lod_discard_set(prefab, level=0):
+    """Renderer fileIDs that are NOT at the wanted detail level.
 
-    A renderer listed under BOTH LOD0 and a lower level stays (the subtraction
-    at the end) -- LODGroups do share renderers across levels."""
+    Read off the LODGroup components the prefab itself carries -- the game's own
+    statement of which renderer draws at which distance. Never off a name: a name
+    suffix is a convention one game keeps and the next does not, while a LODGroup
+    is the engine's own declaration and every game that uses LODs has one.
+
+    A renderer listed at the wanted level STAYS even when it is also listed at
+    others (the subtraction at the end) -- a LODGroup routinely shares renderers
+    across levels, and a shared one belongs to every level that lists it.
+
+    A group that does not author the wanted level contributes its NEAREST one
+    rather than nothing: a part simply not authored that far out is normal, and
+    dropping it would delete geometry the game does draw. A renderer under no
+    LODGroup at all is not a detail level of anything and is never discarded."""
+    if level == EVERY_LEVEL:
+        return set()
     keep = set()
     discard = set()
     for group in prefab.all("LODGroup"):
         lods = group.data.get("m_LODs") or []
-        for level, lod in enumerate(lods):
+        if not lods:
+            continue
+        wanted = min(range(len(lods)), key=lambda index: (abs(index - level), index))
+        for index, lod in enumerate(lods):
             for ref in (lod.get("renderers") or []):
                 renderer = ref.get("renderer") if isinstance(ref, dict) else None
                 fid = renderer.get("fileID") if isinstance(renderer, dict) else None
                 if fid is None:
                     continue
-                if level == 0:
-                    keep.add(fid)
-                else:
-                    discard.add(fid)
+                (keep if index == wanted else discard).add(fid)
     return discard - keep
 
 
@@ -154,7 +172,7 @@ def resolve_filters(options):
     return merged
 
 
-def iter_renderers(prefab, go_to_node, options=None, stats=None):
+def iter_renderers(prefab, go_to_node, options=None, stats=None, at_level=None):
     """Yield a RendererInfo per renderer that should contribute geometry.
 
     ``go_to_node`` maps GameObject fileID -> hierarchy.Node (``{n.go_id: n for
@@ -162,10 +180,14 @@ def iter_renderers(prefab, go_to_node, options=None, stats=None):
     to read it afterwards, or let it be created and dropped."""
     filters = resolve_filters(options)
     stats = stats if stats is not None else SkipStats()
-    discard = lod_discard_set(prefab) if filters["lod0_only"] else set()
+    # A caller that knows this game states detail some other way hands the test in;
+    # everyone else gets the prefab's own LOD components.
+    if at_level is None:
+        discard = lod_discard_set(prefab, filters["detail_level"])
+        at_level = lambda renderer: renderer.file_id not in discard
 
     def accept(renderer, node):
-        if renderer.file_id in discard:
+        if not at_level(renderer):
             stats.lod += 1
             return None
         if (not filters["import_shadow_proxies"]

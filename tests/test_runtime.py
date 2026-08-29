@@ -54,11 +54,11 @@ class TestWorkspace(unittest.TestCase):
 DEFAULTS = {
     "ripperhook_bin": "",
     "decoder_id": "",
-    "lod0_only": True,
+    "detail_level": 0,
     "texture_resolution": 2048,
     "settings_version": 3,
 }
-VOLATILE = ("lod0_only", "texture_resolution")
+VOLATILE = ("detail_level", "texture_resolution")
 
 
 class TestJsonSettings(unittest.TestCase):
@@ -104,12 +104,12 @@ class TestJsonSettings(unittest.TestCase):
         os.makedirs(os.path.dirname(self.path), exist_ok=True)
         with open(self.path, "w", encoding="utf-8") as handle:
             json.dump({"settings_version": 1, "ripperhook_bin": "D:/typed/by/hand",
-                       "decoder_id": "Endfield_1.4.4", "lod0_only": False,
+                       "decoder_id": "Endfield_1.4.4", "detail_level": 2,
                        "texture_resolution": 512}, handle)
         store = self._store()
         self.assertEqual(store.get("ripperhook_bin"), "D:/typed/by/hand")  # user input kept
         self.assertEqual(store.get("decoder_id"), "Endfield_1.4.4")        # user input kept
-        self.assertTrue(store.get("lod0_only"))                            # reset
+        self.assertEqual(store.get("detail_level"), 0)                     # reset
         self.assertEqual(store.get("texture_resolution"), 2048)            # reset
         self.assertEqual(store.get("settings_version"), 3)
         # ...and the repaired file was written back, so it only happens once.
@@ -119,8 +119,8 @@ class TestJsonSettings(unittest.TestCase):
     def test_no_migration_at_the_current_version(self):
         os.makedirs(os.path.dirname(self.path), exist_ok=True)
         with open(self.path, "w", encoding="utf-8") as handle:
-            json.dump({"settings_version": 3, "lod0_only": False}, handle)
-        self.assertFalse(self._store().get("lod0_only"))
+            json.dump({"settings_version": 3, "detail_level": 2}, handle)
+        self.assertEqual(self._store().get("detail_level"), 2)
 
     def test_save_leaves_no_temp_file_behind(self):
         store = self._store()
@@ -129,14 +129,14 @@ class TestJsonSettings(unittest.TestCase):
 
     def test_subset(self):
         store = self._store()
-        store.set_many(lod0_only=False)
-        self.assertEqual(store.subset(("lod0_only",), bool), {"lod0_only": False})
+        store.set_many(detail_level=2)
+        self.assertEqual(store.subset(("detail_level",), int), {"detail_level": 2})
 
     def test_reset(self):
         store = self._store()
-        store.set_many(lod0_only=False, ripperhook_bin="D:/bin")
-        store.reset(("lod0_only",))
-        self.assertTrue(store.get("lod0_only"))
+        store.set_many(detail_level=2, ripperhook_bin="D:/bin")
+        store.reset(("detail_level",))
+        self.assertEqual(store.get("detail_level"), 0)
         self.assertEqual(store.get("ripperhook_bin"), "D:/bin")
 
 

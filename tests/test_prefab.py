@@ -156,7 +156,7 @@ class TestIterRenderers(unittest.TestCase):
         self.assertEqual([r.kind for r in found], ["skinned", "static"])
 
     def test_lod_filter_can_be_turned_off(self):
-        found, stats = self._run(lod0_only=False)
+        found, stats = self._run(detail_level=prefab.EVERY_LEVEL)
         self.assertIn(701, [r.file_id for r in found])
         self.assertEqual(stats.lod, 0)
 
