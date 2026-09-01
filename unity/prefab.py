@@ -30,7 +30,7 @@ both hosts' existing output ordering.
 
 from __future__ import annotations
 
-from . import mesh_decoder
+from . import builtin_meshes, mesh_decoder
 
 # Unity ShadowCastingMode.ShadowsOnly.
 SHADOWS_ONLY = 3
@@ -330,15 +330,21 @@ class MeshLoad:
     for that one, which is genuinely about Unity's storage formats)."""
 
     __slots__ = ("decoded", "document", "problem", "detail", "name",
-                 "dropped_topologies", "variable_bone_count_weights")
+                 "dropped_topologies", "variable_bone_count_weights", "builtin")
 
     def __init__(self, decoded=None, document=None, problem=None, detail="",
-                 name="", dropped_topologies=(), variable_bone_count_weights=0):
+                 name="", dropped_topologies=(), variable_bone_count_weights=0,
+                 builtin=""):
         self.decoded = decoded
         self.document = document
         self.problem = problem      # None | no_ref | not_found | no_mesh_document | empty
         self.detail = detail        # guid, or the empty-mesh diagnosis
         self.name = name            # the Mesh asset's own m_Name
+        # Non-empty when this geometry was REBUILT from the engine's own primitive
+        # definition rather than read out of the game (see builtin_meshes): the
+        # value is "Cube (exact)" / "Sphere (reconstructed)", so a host reports
+        # where it came from instead of presenting it as extracted data.
+        self.builtin = builtin
         self.dropped_topologies = tuple(dropped_topologies)
         # Words of m_VariableBoneCountWeights this mesh carries. Non-zero means
         # the skin has influences past the fixed four that no decode path here
@@ -355,6 +361,22 @@ def load_mesh(db, mesh_ref, fallback_name=""):
     asset databases (disk or bridge closure)."""
     if not isinstance(mesh_ref, dict) or not mesh_ref.get("guid"):
         return MeshLoad(problem="no_ref", name=fallback_name)
+
+    # The engine's own primitives before anything else: they live in `unity default
+    # resources`, which is not part of any game's data and which an extraction
+    # therefore CANNOT contain -- so looking them up would fail forever, and the
+    # renderer would silently vanish. Build them from the engine's definition instead.
+    primitive = builtin_meshes.is_builtin(mesh_ref)
+    if primitive is not None:
+        decoded = builtin_meshes.build(primitive)
+        if decoded is None:
+            return MeshLoad(problem="not_found", name=fallback_name,
+                            detail="engine built-in '{0}', which is not rebuilt here".format(primitive))
+        return MeshLoad(decoded=decoded, name=primitive,
+                        builtin="{0} ({1})".format(
+                            primitive,
+                            "exact" if primitive in builtin_meshes.EXACT else "reconstructed"))
+
     guid = mesh_ref["guid"]
 
     # Bridge fast path first: the exporter already handed this mesh's serialized
