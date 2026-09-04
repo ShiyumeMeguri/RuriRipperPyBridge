@@ -312,9 +312,11 @@ def reset():
     clear_animation_build_state()
 
 
-def ensure_bridge(decoder_id, game_root):
-    """Get (or lazily create) the process-wide bridge, pointed at ``decoder_id`` and
-    ``game_root`` on EVERY call -- not just on first construction.
+def ensure_bridge(decoder_id, game_root, source_options=None):
+    """Get (or lazily create) the process-wide bridge, pointed at ``decoder_id``,
+    ``game_root`` and ``source_options`` (how the install is read beyond its folder,
+    see pythonnet_bridge.set_source_options) on EVERY call -- not just on first
+    construction.
 
     Root-cause fix (2026-07-18): this used to construct the session once and return the SAME
     instance forever after, ignoring the decoder on every later call, so a cabmap built before
@@ -325,10 +327,12 @@ def ensure_bridge(decoder_id, game_root):
     global BRIDGE
     decoder_id = str(decoder_id or "")
     game_root = str(game_root or "")
+    options = dict(source_options or {})
     if BRIDGE is None:
-        BRIDGE = pythonnet_bridge.RipperBridge(decoder_id, game_root)
-    elif BRIDGE.decoder_id != decoder_id or BRIDGE.game_root != game_root:
-        BRIDGE.reinitialize(decoder_id, game_root)
+        BRIDGE = pythonnet_bridge.RipperBridge(decoder_id, game_root, options)
+    elif (BRIDGE.decoder_id != decoder_id or BRIDGE.game_root != game_root
+          or BRIDGE.source_options != options):
+        BRIDGE.reinitialize(decoder_id, game_root, options)
     return BRIDGE
 
 

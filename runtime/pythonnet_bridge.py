@@ -380,42 +380,67 @@ def list_decoders():
     return [tuple(flat[i:i + 3]) for i in range(0, len(flat) - 2, 3)]
 
 
-def read_install(game_root):
-    """What the Unity players under ``game_root`` say they are:
+def read_install(game_root, source_options=None):
+    """What the players under ``game_root`` say they are:
     ``[{"data_folder", "company", "product", "game_version", "engine_version",
-    "is_project"}, ...]``.
+    "engine", "is_project"}, ...]``.
 
-    Two small files per player and nothing else -- app.info for the names the build
-    publishes, globalgamemanagers for its own bundleVersion and the Unity version its
-    serialized header states. Either version is "" when the build states none, which
-    is a fact about the install and not an error. ``is_project`` marks the ONE player
-    the install IS -- an install routinely ships several (a game, its VR build, its
-    studio).
+    A Unity build is read off two small files per player and nothing else --
+    app.info for the names the build publishes, globalgamemanagers for its own
+    bundleVersion and the Unity version its serialized header states. A build on
+    another engine is answered by that engine's own probe in the kernel, which may
+    need ``source_options`` (an archive key, say) to open its files at all -- they
+    are pushed first (see set_source_options). Either version is "" when the build
+    states none, which is a fact about the install and not an error. ``engine`` is
+    the engine FAMILY the build runs on ("Unity", "UnrealEngine", ...) -- what a
+    family-wide decoder and an engine-level panel are selected by. ``is_project``
+    marks the ONE player the install IS -- an install routinely ships several (a
+    game, its VR build, its studio).
 
     Needs only the runtime: this answers "which game is this folder" before anything
     is loaded and without any decoder active."""
     _ensure_runtime()
+    if source_options is not None:
+        set_source_options(source_options)
     flat = [str(value) for value in _bridge_type.ReadInstall(str(game_root or ""))]
     players = []
-    for i in range(0, len(flat) - 5, 6):
+    for i in range(0, len(flat) - 6, 7):
         players.append({
             "data_folder": flat[i],
             "company": flat[i + 1],
             "product": flat[i + 2],
             "game_version": flat[i + 3],
             "engine_version": flat[i + 4],
-            "is_project": flat[i + 5] == "1",
+            "engine": flat[i + 5],
+            "is_project": flat[i + 6] == "1",
         })
     return players
 
 
-def resolve_decoder(product, game_version, engine_version):
+def resolve_decoder(product, game_version, engine_version, engine=""):
     """The decoder id this install reads through, or "" when none applies (a plain
-    Unity build needs no decoder). The rule lives in the kernel (HookCatalog.Resolve)
+    Unity build needs no decoder). The rule lives in the kernel (HookCatalog.Resolve):
+    the product's own decoders first, then the one declared for its engine family,
     so every host resolves alike."""
     _ensure_runtime()
     return str(_bridge_type.ResolveDecoder(
-        str(product or ""), str(game_version or ""), str(engine_version or "")))
+        str(product or ""), str(game_version or ""), str(engine_version or ""),
+        str(engine or "")))
+
+
+def set_source_options(options):
+    """State how the install is to be READ beyond its folder: ``{name: value}`` of
+    whatever the active decoder needs to open its files (an archive key, an engine
+    version, a schema file). The kernel carries them verbatim; which names exist is
+    what the decoder publishes as a dataset, so a host draws its form from that and
+    never spells a name itself. Pushed before a probe, a build or a load; pushing the
+    same values again is free."""
+    _ensure_runtime()
+    flat = []
+    for name, value in sorted((options or {}).items()):
+        flat.append(str(name))
+        flat.append("" if value is None else str(value))
+    _bridge_type.SetSourceOptions(_string_array(flat))
 
 
 def _string_array(strings):
@@ -500,12 +525,20 @@ class RipperBridge:
     ONE decoder, never a set: the process reads one game at a time, and which
     features run is the host's own declaration on the other side of the bridge."""
 
-    def __init__(self, decoder_id, game_root):
+    def __init__(self, decoder_id, game_root, source_options=None):
         _ensure_runtime()
         self._bridge = _bridge_type
+        # How the install is read beyond its folder (see set_source_options), kept
+        # per session so switching installs restates the values that install was
+        # opened with. Pushed BEFORE Initialize: a decoder opens its source on apply.
+        self._source_options = dict(source_options or {})
+        set_source_options(self._source_options)
         self._bridge.Initialize(str(decoder_id or ""), str(game_root or ""))
         self._decoder_id = str(decoder_id or "")
         self._game_root = str(game_root or "")
+        # install key -> the source options that install's cabmap was built/loaded
+        # under, restated by use_session alongside its decoder and root.
+        self._options_by_key = {}
         # install key -> the folder that install's datasets read, captured when its
         # cabmap loaded. use_session re-opens the session on it, so a dataset never
         # has to be told where the game is installed.
@@ -549,7 +582,7 @@ class RipperBridge:
         above this line ever spells an install layout."""
         return self._game_root
 
-    def reinitialize(self, decoder_id, game_root=None):
+    def reinitialize(self, decoder_id, game_root=None, source_options=None):
         """Re-apply a (possibly different) decoder onto this SAME session, preserving
         self._map/clip_curves_by_guid -- unlike constructing a fresh RipperBridge, this does not
         drop an already-loaded cabmap. Safe/idempotent on the C# side (RipperBlenderBridge.
@@ -558,9 +591,17 @@ class RipperBridge:
         is unchanged. Callers should still skip the call when it is, to avoid the log spam
         ApplyHooks prints per hook transition."""
         root = self._game_root if game_root is None else str(game_root or "")
+        if source_options is not None:
+            self._source_options = dict(source_options)
+        set_source_options(self._source_options)
         self._bridge.Initialize(str(decoder_id or ""), root)
         self._decoder_id = str(decoder_id or "")
         self._game_root = root
+
+    @property
+    def source_options(self):
+        """The source options this session was last opened with -- see set_source_options."""
+        return dict(self._source_options)
 
     @property
     def has_map(self):
@@ -582,6 +623,7 @@ class RipperBridge:
             self.maps_by_key[key] = handle
             self._decoder_by_key[key] = self._decoder_id
             self._roots_by_key[key] = self._game_root
+            self._options_by_key[key] = dict(self._source_options)
 
     def rename_session(self, old_key, new_key):
         """Refile every per-install slot from ``old_key`` to ``new_key`` -- the
@@ -589,7 +631,8 @@ class RipperBridge:
         install that only just learned its own name keeps the map it paid for."""
         if old_key == new_key:
             return
-        for slot in (self.maps_by_key, self._decoder_by_key, self._roots_by_key):
+        for slot in (self.maps_by_key, self._decoder_by_key, self._roots_by_key,
+                     self._options_by_key):
             if old_key in slot:
                 slot[new_key] = slot.pop(old_key)
 
@@ -607,8 +650,9 @@ class RipperBridge:
         self._map = self.maps_by_key[key]
         decoder = self._decoder_by_key.get(key, self._decoder_id)
         root = self._roots_by_key.get(key, self._game_root)
-        if decoder != self._decoder_id or root != self._game_root:
-            self.reinitialize(decoder, root)
+        options = self._options_by_key.get(key, self._source_options)
+        if decoder != self._decoder_id or root != self._game_root or options != self._source_options:
+            self.reinitialize(decoder, root, options)
 
     def enumerate_table(self):
         """The row set as a columnar row_table.RowTable -- raw blob/offset
