@@ -623,6 +623,16 @@ class RipperBridge:
         self._bridge.Initialize(str(decoder_id or ""), root)
         self._decoder_id = str(decoder_id or "")
         self._game_root = root
+        # The per-install slots restate what an install was LAST opened with, not what
+        # it was opened with when its cabmap loaded: a value stated afterwards (a schema
+        # file set once the form warned it was missing) has to survive switching away
+        # from the install and back, so every slot at this root follows the values just
+        # applied. Without this, use_session restated the stale snapshot and the kernel
+        # silently lost the value the moment the tab was re-selected.
+        for key, slot_root in self._roots_by_key.items():
+            if slot_root == root:
+                self._decoder_by_key[key] = self._decoder_id
+                self._options_by_key[key] = dict(self._source_options)
 
     @property
     def source_options(self):
