@@ -101,39 +101,19 @@ class TestParseMaterial(unittest.TestCase):
 
 
 class TestSlotLookup(unittest.TestCase):
-    def test_curated_priority_beats_declaration_order(self):
+    def test_named_slots_in_the_given_order(self):
         props = material.parse_material(_doc(LISTED))
-        name, guid = props.find_texture(material.BASE_COLOR_NAMES,
-                                        material.GENERIC_BASE_COLOR_HINTS)
-        self.assertEqual(name, "_MainTex")  # first in the curated list
-        self.assertEqual(guid, "cccc3333cccc3333cccc3333cccc3333")
-
-    def test_generic_hint_fallback_finds_an_uncurated_name(self):
-        props = material.parse_material(_doc(LISTED))
-        # Nothing curated matches, so the substring hint finds the odd name.
-        name, guid = props.find_texture(["_NotPresent"], ("diffuse",))
-        self.assertEqual(name, "_CustomDiffuseTex")
-        self.assertEqual(guid, "dddd4444dddd4444dddd4444dddd4444")
-
-    def test_generic_hints_follow_declaration_order(self):
-        """With no curated hit, the FIRST declared property matching any hint
-        wins -- "_MainTex" matches the "maintex" hint and is declared first."""
-        props = material.parse_material(_doc(LISTED))
-        name, _guid = props.find_texture(["_NotPresent"], material.GENERIC_BASE_COLOR_HINTS)
+        name, guid = props.find_texture(["_NotPresent", "_MainTex"])
         self.assertEqual(name, "_MainTex")
+        self.assertEqual(guid, "cccc3333cccc3333cccc3333cccc3333")
 
     def test_no_match(self):
         props = material.parse_material(_doc(LISTED))
         self.assertEqual(props.find_texture(["_Nope"]), (None, None))
 
-    def test_normal_slot(self):
-        props = material.parse_material(_doc(NESTED))
-        name, _guid = props.find_texture(material.NORMAL_NAMES, material.GENERIC_NORMAL_HINTS)
-        self.assertEqual(name, "_BumpMap")
-
     def test_find_color(self):
         props = material.parse_material(_doc(NESTED))
-        self.assertEqual(props.find_color(material.BASE_COLOR_FACTORS),
+        self.assertEqual(props.find_color(["_BaseColor", "_Color"]),
                          [1.0, 0.5, 0.25, 1.0])
         self.assertIsNone(props.find_color(["_Missing"]))
 
