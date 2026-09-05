@@ -79,6 +79,12 @@ EMISSION_NAMES = ["_EmissionMap", "_EmissiveMap", "_EmissionTex", "_GlowMap"]
 # wrong-looking-but-incorrect metal/rough/occlusion values, which is worse than
 # leaving the slot at its default.
 MRO_NAMES = ["_MROMap"]
+# A packed map whose channel layout the material DECLARES beside it: `_PackedMap`
+# plus `_PackedMap<Part>` floats naming the channel index (0-3) that carries
+# Metallic, Roughness, Occlusion or Specular. A converter that read the packing
+# off the game's own compiled shader states it this way, so no layout is guessed.
+PACKED_MAP_NAMES = ["_PackedMap"]
+PACKED_MAP_PARTS = ("Metallic", "Roughness", "Occlusion", "Specular")
 METALLIC_GLOSS_NAMES = ["_MetallicGlossMap", "_SpecGlossMap"]
 
 BASE_COLOR_FACTORS = ["_BaseColor", "_Color", "_MainColor", "_TintColor"]
