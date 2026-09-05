@@ -16,6 +16,8 @@ import re
 
 from . import unity_yaml
 
+_SRGB_PATTERN = re.compile(r"sRGBTexture:\s*(\d+)")
+
 _GUID_RE = re.compile(r"^guid:\s*([0-9a-fA-F]{32})\s*$")
 
 
@@ -46,6 +48,7 @@ class AssetDatabase:
         self._guid_to_path = {}
         self._scanned_dirs = set()
         self._file_cache = {}
+        self._texture_srgb = {}
         # The folder containing the imported asset is always cheap to scan.
         self._scan_dir(self.primary_dir)
 
@@ -93,6 +96,28 @@ class AssetDatabase:
             self._scan_dir(self.assets_dir)
             return self._guid_to_path.get(guid)
         return None
+
+    def texture_is_srgb(self, guid):
+        """Whether this texture's own bytes are sRGB-encoded, read off the asset's own .meta
+        (TextureImporter.sRGBTexture, which the exporter wrote from Texture2D.m_ColorSpace),
+        or None for a guid whose meta states nothing. The bridge database answers the same
+        question from the closure; both read the asset, neither guesses from a slot or a name."""
+        path = self.resolve_guid(guid)
+        if not path:
+            return None
+        cached = self._texture_srgb.get(path)
+        if cached is not None:
+            return cached[0]
+        stated = None
+        try:
+            with open(path + ".meta", "r", encoding="utf-8", errors="replace") as handle:
+                match = _SRGB_PATTERN.search(handle.read())
+            if match:
+                stated = match.group(1) != "0"
+        except OSError:
+            stated = None
+        self._texture_srgb[path] = (stated,)
+        return stated
 
     # -- parsed file cache ---------------------------------------------------
 

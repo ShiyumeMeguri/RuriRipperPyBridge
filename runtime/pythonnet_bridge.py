@@ -592,6 +592,7 @@ class RipperBridge:
         # {guid -> exported path (real name + extension)} for the LAST
         # import_cabs call -- every asset's display identity.
         self.asset_paths_by_guid = {}
+        self.texture_srgb_by_guid = {}
         # {seed container path -> exported guid} from the LAST import_reachable
         # call -- the placement-to-asset join (see ImportReachable).
         self.seed_asset_guids_by_path = {}
@@ -983,6 +984,14 @@ class RipperBridge:
         # that names things by guid is a host that never read this.
         self.asset_paths_by_guid = {str(kvp.Key).lower(): str(kvp.Value)
                                     for kvp in result.AssetPaths}
+        # guid -> whether the asset's own bytes are sRGB-encoded, as the exported importer
+        # settings state it (TextureImporter.sRGBTexture, written from Texture2D.m_ColorSpace).
+        # Only textures are in here. This is the ONE place a colour space is stated: a host
+        # that decides it from the slot a texture is bound to gets it wrong the moment one
+        # texture is bound to two slots, and a host that decides it from the file name gets it
+        # wrong for every mask map (one scene's 20 "_M" maps split 12 sRGB / 8 linear).
+        self.texture_srgb_by_guid = {str(kvp.Key).lower(): bool(kvp.Value)
+                                     for kvp in result.TextureSrgb}
         # "collectionName|pathId" -> this batch's exported clip guid: the join
         # between a graph identity picked in an earlier scan and the bytes/blobs
         # this call just materialized. Guids never leave the batch; keys do.

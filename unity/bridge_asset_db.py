@@ -26,7 +26,8 @@ class BridgeAssetDatabase:
     bridge. Each guid is parsed at most once and memoized, same caching
     behaviour as the disk AssetDatabase's file cache."""
 
-    def __init__(self, assets, clip_curve_blobs=None, mesh_blobs=None, asset_paths=None):
+    def __init__(self, assets, clip_curve_blobs=None, mesh_blobs=None, asset_paths=None,
+                 texture_srgb=None):
         # assets: dict[guid_lower] -> the asset's exported bytes, any format
         # clip_curve_blobs: dict[guid_lower] -> (meta_json, payload_bytes) --
         #   the bridge's zero-parse AnimationClip curve payloads (see
@@ -37,6 +38,7 @@ class BridgeAssetDatabase:
         #   (real file name + extension) -- every asset's display identity
         #   (RipperBridge.asset_paths_by_guid)
         self._assets = assets
+        self._texture_srgb = texture_srgb or {}
         self._mesh_blobs = mesh_blobs or {}
         self._asset_paths = asset_paths or {}
         self._file_cache = {}  # guid -> UnityFile
@@ -140,6 +142,15 @@ class BridgeAssetDatabase:
         if not key:
             return None
         return self._assets.get(key.lower())
+
+    def texture_is_srgb(self, guid):
+        """Whether this texture's own bytes are sRGB-encoded, as the asset states it, or None
+        for a guid that states nothing (not a texture, or a closure without the channel).
+        The caller must not substitute a guess for None: a slot's semantics and a file name
+        are both measured to disagree with the asset."""
+        if not guid:
+            return None
+        return self._texture_srgb.get(guid.lower())
 
     def asset_path(self, guid):
         """The exported path the closure wrote for a guid (real name +
