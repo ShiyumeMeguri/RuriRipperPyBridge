@@ -90,6 +90,10 @@ def set_module_paths(paths):
 
 
 def _load_modules():
+    # The modules the build declared beside the kernel load first (Modules/*.module, one
+    # absolute path each -- how the Unreal decoder is found with nothing set here); the
+    # paths a preference adds come on top.
+    _bridge_type.LoadDeclaredModules()
     for path in _module_paths:
         _bridge_type.LoadModule(path)
 
