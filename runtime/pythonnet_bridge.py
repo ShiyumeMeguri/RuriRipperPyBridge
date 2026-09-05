@@ -73,6 +73,27 @@ def set_bin_dir_hint(hint):
     _bin_dir_hint = hint
 
 
+_module_paths = ()
+
+
+def set_module_paths(paths):
+    """Hook assemblies the kernel loads beyond its own -- modules built into another host's
+    output with their dependencies beside them (Ruri.FModelHook.dll, the Unreal decoder).
+    Every decoder and install probe a module declares answers list_decoders/read_install/
+    resolve_decoder from then on. Loaded as soon as the runtime is up: right away when it
+    already is, else the moment _ensure_runtime brings it up. An empty entry is no module;
+    a path that does not exist is an error, never a silent skip."""
+    global _module_paths
+    _module_paths = tuple(p for p in (str(x or "").strip() for x in (paths or ())) if p)
+    if _bridge_type is not None:
+        _load_modules()
+
+
+def _load_modules():
+    for path in _module_paths:
+        _bridge_type.LoadModule(path)
+
+
 def _configured_bin_dir():
     if _bin_dir_override:
         return _bin_dir_override
@@ -361,6 +382,7 @@ def _ensure_runtime():
             "Ruri.RipperHook.dll loaded, but has no Ruri.RipperHook.Bridge.RipperBlenderBridge type -- "
             "rebuild Source/Ruri.RipperHook/Ruri.RipperHook.csproj against the latest source.")
     _bridge_type = _StaticTypeProxy(bridge_type)
+    _load_modules()
 
 
 def list_decoders():
